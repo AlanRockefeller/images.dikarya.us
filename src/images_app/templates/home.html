@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Dikarya Images · Find useful fungi photographs{% endblock %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">A community field guide</p>
+  <h1>Which images best represent a taxon?</h1>
+  <p class="hero-copy">Browse photographs of fungi and help rank the images that make identification and learning easier.</p>
+  <form class="search-box" action="/taxa" method="get" role="search">
+    <label class="sr-only" for="taxon-search">Search scientific names and synonyms</label>
+    <input id="taxon-search" name="q" type="search" placeholder="Search a scientific name or synonym" autocomplete="off">
+    <button type="submit">Search taxa</button>
+  </form>
+  <a class="text-link" href="/taxa">Browse all fungal taxa <span aria-hidden="true">→</span></a>
+</section>
+
+{% if taxa %}
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">From the community</p><h2>Fungi with photographs</h2></div><a href="/taxa">Browse all</a></div>
+  <div class="taxon-list featured-list">
+    {% for taxon in taxa %}
+      <a class="taxon-row" href="/taxon/{{ taxon.id }}">
+        <span><strong>{{ taxon.scientific_name }}</strong><small>{{ taxon.rank or "Taxon" }}</small></span>
+        <span class="image-count">{{ taxon.image_count }} images <span aria-hidden="true">→</span></span>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+<section class="empty-state home-empty"><h2>Fungal images are being prepared</h2><p>The directory will fill as the first licensed image metadata import completes.</p></section>
+{% endif %}
+{% endblock %}

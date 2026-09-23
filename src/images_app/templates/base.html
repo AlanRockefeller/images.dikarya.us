@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>{% block title %}Dikarya Images{% endblock %}</title>
+  <link rel="stylesheet" href="/static/site.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Dikarya Images home"><span class="brand-mark">D</span><span>Dikarya Images</span></a>
+    <nav aria-label="Main navigation">
+      <a href="/taxa">Browse fungi</a>
+      {% if user %}
+        {% if user.is_admin %}<a href="/admin">Admin</a>{% endif %}
+        <span class="nav-user">{{ user.name }}</span>
+        <form action="/logout" method="post" class="inline-form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="nav-button" type="submit">Log out</button>
+        </form>
+      {% else %}
+        <a href="/login">Log in</a>
+        <a class="nav-join" href="/register">Join</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer">
+    <span>Community rankings for useful, well-documented images.</span>
+    <a href="https://www.inaturalist.org/" rel="external">Taxonomy by iNaturalist</a>
+  </footer>
+</body>
+</html>

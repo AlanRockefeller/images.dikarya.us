@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Browse fungi · Dikarya Images{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <p class="eyebrow">Fungi</p>
+  <h1>Browse taxa</h1>
+  <p>Search accepted names and aliases, or browse alphabetically.</p>
+  <form class="search-box search-box-small" action="/taxa" method="get" role="search">
+    <label class="sr-only" for="taxon-search">Search scientific names and synonyms</label>
+    <input id="taxon-search" name="q" type="search" value="{{ q }}" placeholder="Scientific name or synonym">
+    <button type="submit">Search</button>
+  </form>
+  <nav class="alphabet" aria-label="Browse by first letter">
+    {% for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" %}<a {% if letter == ch %}aria-current="page"{% endif %} href="/taxa?letter={{ ch }}">{{ ch }}</a>{% endfor %}
+  </nav>
+</section>
+<section class="section-block directory-block">
+  <div class="section-heading"><h2>{% if q %}Matches for “{{ q }}”{% elif letter %}Names beginning with {{ letter }}{% else %}Taxa with images{% endif %}</h2><span>{{ total }} results</span></div>
+  {% if taxa %}
+    <div class="taxon-list">
+      {% for taxon in taxa %}
+        <a class="taxon-row" href="/taxon/{{ taxon.id }}">
+          <span><strong>{{ taxon.scientific_name }}</strong><small>{{ taxon.rank or "Taxon" }}</small></span>
+          <span class="image-count">{{ taxon.image_count }} images <span aria-hidden="true">→</span></span>
+        </a>
+      {% endfor %}
+    </div>
+    {% if page_count > 1 %}<nav class="pagination" aria-label="Directory pages">
+      {% if page > 1 %}<a href="/taxa?q={{ q|urlencode }}&letter={{ letter }}&page={{ page - 1 }}">← Previous</a>{% endif %}
+      <span>Page {{ page }} of {{ page_count }}</span>
+      {% if page < page_count %}<a href="/taxa?q={{ q|urlencode }}&letter={{ letter }}&page={{ page + 1 }}">Next →</a>{% endif %}
+    </nav>{% endif %}
+  {% else %}
+    <div class="empty-state"><h3>No taxa found</h3><p>Try another spelling or a shorter search.</p></div>
+  {% endif %}
+</section>
+{% endblock %}

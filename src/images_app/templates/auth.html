@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{% if mode == "register" %}Join{% else %}Log in{% endif %} · Dikarya Images{% endblock %}
+{% block content %}
+<section class="auth-wrap">
+  <p class="eyebrow">Dikarya Images account</p>
+  <h1>{% if mode == "register" %}Join the community{% else %}Welcome back{% endif %}</h1>
+  <p>{% if mode == "register" %}Create an account to rank useful representations of fungi.{% else %}Log in to see and update your rankings.{% endif %}</p>
+  {% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+  <form method="post" action="/{{ mode }}" class="auth-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% if mode == "register" %}<label>Name<input name="name" type="text" maxlength="120" autocomplete="name" required></label>{% endif %}
+    <label>Email<input name="email" type="email" maxlength="320" autocomplete="email" required></label>
+    <label>Password<input name="password" type="password" minlength="12" maxlength="256" autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}" required>{% if mode == "register" %}<small>Use at least 12 characters.</small>{% endif %}</label>
+    <button class="primary-button" type="submit">{% if mode == "register" %}Create account{% else %}Log in{% endif %}</button>
+  </form>
+  <p class="auth-switch">{% if mode == "register" %}Already a member? <a href="/login">Log in</a>.{% else %}New here? <a href="/register">Create an account</a>.{% endif %}</p>
+</section>
+{% endblock %}

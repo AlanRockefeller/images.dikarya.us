@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ taxon.scientific_name }} · Dikarya Images{% endblock %}
+{% block content %}
+<nav class="breadcrumbs" aria-label="Taxonomy">
+  <a href="/">Home</a>
+  {% for ancestor in ancestors %}{% if ancestor.id != taxon.id %}<span aria-hidden="true">/</span><a href="/taxon/{{ ancestor.id }}">{{ ancestor.scientific_name }}</a>{% endif %}{% endfor %}
+  <span aria-hidden="true">/</span><span aria-current="page">{{ taxon.scientific_name }}</span>
+</nav>
+<section class="taxon-intro">
+  <div><p class="eyebrow">{{ taxon.rank or "Taxon" }} · iNaturalist #{{ taxon.inat_taxon_id }}</p><h1>{{ taxon.scientific_name }}</h1></div>
+  <div class="taxon-stats"><span><strong>{{ total_images }}</strong> images</span><span><strong>{{ voted_users }}</strong> voters</span></div>
+</section>
+<section class="guidance" aria-label="Ranking guidance">
+  <span class="guidance-icon" aria-hidden="true">✳</span>
+  <p><strong>Choose useful representations.</strong> Consider diagnostic characters, typical morphology, clarity, and how well details read at smaller sizes—not only which photo is prettiest.</p>
+</section>
+{% if user %}<p class="vote-hint">Select any images you think represent this taxon well. Your choices save as you go; use the arrows on selected cards to adjust their order.</p>
+{% else %}<p class="vote-hint"><a href="/login">Log in</a> or <a href="/register">join</a> to rank images. You can browse without an account.</p>{% endif %}
+{% include "_gallery.html" %}
+{% endblock %}
