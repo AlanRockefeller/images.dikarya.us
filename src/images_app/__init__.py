@@ -1,0 +1,1 @@
+"""Dikarya Images application."""
