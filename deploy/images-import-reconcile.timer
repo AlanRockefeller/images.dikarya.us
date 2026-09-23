@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the monthly iNaturalist metadata reconciliation
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=4h
+Unit=images-import-reconcile.service
+
+[Install]
+WantedBy=timers.target
