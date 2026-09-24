@@ -81,8 +81,8 @@ Example install flow (run as an administrator after reviewing the sample files).
 python3.12 -m venv /var/www/images.dikarya.us/app/.venv
 systemctl stop images.service images-import-daily.timer images-import-reconcile.timer
 systemctl stop images-import-daily.service images-import-reconcile.service
-/var/www/images.dikarya.us/app/.venv/bin/pip install --force-reinstall /var/www/images.dikarya.us/app
-chgrp -R images /var/www/images.dikarya.us/app
+/var/www/images.dikarya.us/app/.venv/bin/pip install /var/www/images.dikarya.us/app
+chown -R alan:images /var/www/images.dikarya.us/app
 chmod -R g+rX,g-w,o-rwx /var/www/images.dikarya.us/app
 install -o root -g root -m 0644 deploy/images-migrate.service /etc/systemd/system/images-migrate.service
 install -o root -g root -m 0644 deploy/images.service /etc/systemd/system/images.service
@@ -103,6 +103,8 @@ systemctl enable --now images-import-daily.timer images-import-reconcile.timer
 ```
 
 `journalctl -fu` follows the log and does not exit on its own. Pressing Ctrl-C there stops only the log viewer; a job started with `systemctl start --no-block` continues in the background. Check it with `systemctl status images-import-reconcile.service`.
+
+If resuming after an interrupted deployment, skip the virtual-environment and `pip install` lines when the venv and dependencies are already present. The systemd units put `src/` first on `PYTHONPATH`, so the app runs from the checked-out source; installing the package again is not needed to pick up source changes. The ownership and mode repair is safe to repeat.
 
 The daily unit streams the official nightly MO CSVs and runs the bounded iNaturalist API synchronizer. The monthly reconcile unit streams full iNaturalist metadata, including the large photo metadata table, and stores only the taxonomy archive and bounded join state. Check available bandwidth before enabling the monthly timer. Run the initial imports manually and review their results before enabling unattended schedules. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
 
