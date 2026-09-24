@@ -7,6 +7,7 @@ import re
 import sqlite3
 import tempfile
 import zipfile
+from collections import defaultdict
 from datetime import datetime, timedelta
 from io import TextIOWrapper
 from pathlib import Path
@@ -67,6 +68,111 @@ def _upsert_taxa(session: Session, batch: list[dict], started: datetime) -> None
     ]
     upsert_rows(session, Taxon, rows, ["inat_taxon_id"], ["scientific_name", "rank", "ancestry", "active", "last_synced_at", "updated_at"])
     session.commit()
+
+
+def upsert_inaturalist_images(
+    session: Session,
+    rows: list[dict],
+    *,
+    taxon_conflicts: set[str],
+    metadata_conflicts: set[str],
+) -> tuple[int, set[int]]:
+    """Deduplicate photo IDs and hide records that point at conflicting taxa."""
+    if not rows:
+        return 0, set()
+
+    grouped: dict[str, dict] = {}
+    grouped_conflicts: dict[str, set[str]] = defaultdict(set)
+    touched_taxa: set[int] = set()
+    for incoming in rows:
+        photo_id = str(incoming["source_image_id"])
+        row = dict(incoming)
+        current = grouped.get(photo_id)
+        if current is not None:
+            if current["taxon_id"] != row["taxon_id"]:
+                grouped_conflicts[photo_id].add("taxon")
+            if any(current[field] != row[field] for field in ("license", "photographer", "medium_url")):
+                grouped_conflicts[photo_id].add("metadata")
+            old_observation = str(current.get("source_observation_id") or "")
+            new_observation = str(row.get("source_observation_id") or "")
+            if new_observation < old_observation:
+                grouped[photo_id] = row
+        else:
+            grouped[photo_id] = row
+
+    items = list(grouped.items())
+    for offset in range(0, len(items), 500):
+        batch = items[offset : offset + 500]
+        photo_ids = [photo_id for photo_id, _ in batch]
+        existing = {
+            photo_id: (
+                taxon_id,
+                observation_id,
+                license_name,
+                photographer,
+                medium_url,
+                display_eligible,
+            )
+            for photo_id, taxon_id, observation_id, license_name, photographer, medium_url, display_eligible in session.execute(
+                select(
+                    Image.source_image_id,
+                    Image.taxon_id,
+                    Image.source_observation_id,
+                    Image.license,
+                    Image.photographer,
+                    Image.medium_url,
+                    Image.display_eligible,
+                ).where(Image.source == "inaturalist", Image.source_image_id.in_(photo_ids))
+            )
+        }
+        to_upsert = []
+        for photo_id, row in batch:
+            conflicts = grouped_conflicts.get(photo_id, set())
+            previous = existing.get(photo_id)
+            # Null taxon / ineligible rows are the durable marker for a photo
+            # whose source observations disagree. Do not reactivate it just
+            # because an incremental page contains only one association.
+            if previous and previous[0] is None:
+                conflicts.add("taxon")
+            if previous and not previous[5]:
+                conflicts.add("metadata")
+            different_observation = bool(
+                previous and previous[1] != row.get("source_observation_id")
+            )
+            if different_observation and previous[0] is not None and previous[0] != row["taxon_id"]:
+                conflicts.add("taxon")
+            if different_observation and any(
+                previous[index] != row[field]
+                for index, field in ((2, "license"), (3, "photographer"), (4, "medium_url"))
+            ):
+                conflicts.add("metadata")
+            if "taxon" in conflicts:
+                if photo_id not in taxon_conflicts:
+                    logger.warning("iNaturalist photo %s is linked to multiple taxa; leaving it unresolved", photo_id)
+                taxon_conflicts.add(photo_id)
+            if "metadata" in conflicts:
+                if photo_id not in metadata_conflicts:
+                    logger.warning("iNaturalist photo %s has conflicting license or attribution metadata; hiding it", photo_id)
+                metadata_conflicts.add(photo_id)
+            if photo_id in taxon_conflicts:
+                row["taxon_id"] = None
+                row["active"] = False
+            if photo_id in metadata_conflicts:
+                row["display_eligible"] = False
+                row["active"] = False
+            if row["taxon_id"] is not None:
+                touched_taxa.add(row["taxon_id"])
+            if previous and previous[0] is not None:
+                touched_taxa.add(previous[0])
+            to_upsert.append(row)
+        upsert_rows(
+            session,
+            Image,
+            to_upsert,
+            ["source", "source_image_id"],
+            ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+        )
+    return len(items), touched_taxa
 
 
 def _dwca_id(value: str | None) -> int | None:
@@ -354,6 +460,8 @@ def import_bulk(
             lookup = stage.cursor()
             image_batch = []
             image_count = 0
+            taxon_conflicts: set[str] = set()
+            metadata_conflicts: set[str] = set()
             for row in stream_tsv(photos_path, ("photo_id", "observation_uuid", "observer_id", "extension", "license")):
                 try:
                     photo_id = str(int(row["photo_id"]))
@@ -408,15 +516,25 @@ def import_bulk(
                     }
                 )
                 if len(image_batch) >= 500:
-                    upsert_rows(session, Image, image_batch, ["source", "source_image_id"], ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"])
+                    unique_count, _ = upsert_inaturalist_images(
+                        session,
+                        image_batch,
+                        taxon_conflicts=taxon_conflicts,
+                        metadata_conflicts=metadata_conflicts,
+                    )
                     session.commit()
-                    image_count += len(image_batch)
+                    image_count += unique_count
                     logger.info("imported %d licensed fungal images", image_count)
                     image_batch.clear()
             if image_batch:
-                upsert_rows(session, Image, image_batch, ["source", "source_image_id"], ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"])
+                unique_count, _ = upsert_inaturalist_images(
+                    session,
+                    image_batch,
+                    taxon_conflicts=taxon_conflicts,
+                    metadata_conflicts=metadata_conflicts,
+                )
                 session.commit()
-                image_count += len(image_batch)
+                image_count += unique_count
 
             processed = taxa_count + obs_count + image_count
             if full_reconciliation:

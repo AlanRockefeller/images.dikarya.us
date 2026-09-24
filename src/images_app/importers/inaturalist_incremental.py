@@ -15,8 +15,20 @@ from sqlalchemy.orm import Session
 
 from images_app.config import settings
 from images_app.db import SessionLocal
-from images_app.importers.common import begin_sync, fail_sync, finish_sync, import_lock, refresh_image_counts, upsert_rows
-from images_app.importers.inaturalist import DISPLAY_LICENSES, DISPLAY_LICENSE_LABELS, normalize_ancestry
+from images_app.importers.common import (
+    begin_sync,
+    fail_sync,
+    finish_sync,
+    import_lock,
+    refresh_image_counts,
+    upsert_rows,
+)
+from images_app.importers.inaturalist import (
+    DISPLAY_LICENSES,
+    DISPLAY_LICENSE_LABELS,
+    normalize_ancestry,
+    upsert_inaturalist_images,
+)
 from images_app.models import Image, SyncState, Taxon, utcnow
 
 logger = logging.getLogger("images_app.importers.inaturalist_incremental")
@@ -230,6 +242,8 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
     page_requests = 0
     last_id = id_above
     complete = False
+    taxon_conflicts: set[str] = set()
+    metadata_conflicts: set[str] = set()
     owns_client = client is None
     http = client or httpx.Client(timeout=60, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
@@ -293,14 +307,13 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
                     .values(active=False, updated_at=started)
                 )
             if image_rows:
-                touched_taxa.update(row["taxon_id"] for row in image_rows)
-                upsert_rows(
+                _, image_taxa = upsert_inaturalist_images(
                     session,
-                    Image,
                     image_rows,
-                    ["source", "source_image_id"],
-                    ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+                    taxon_conflicts=taxon_conflicts,
+                    metadata_conflicts=metadata_conflicts,
                 )
+                touched_taxa.update(image_taxa)
             refresh_image_counts(session, touched_taxa)
             processed += len(results)
             page_ids = [int(item["id"]) for item in results if str(item.get("id", "")).isdigit()]

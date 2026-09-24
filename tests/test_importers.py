@@ -13,7 +13,7 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from images_app.importers.inaturalist import import_bulk
+from images_app.importers.inaturalist import import_bulk, upsert_inaturalist_images
 from images_app.importers.inaturalist_incremental import incremental_sync
 from images_app.importers.mushroom_observer import (
     _sqlite_stage,
@@ -36,22 +36,52 @@ def write_tsv(path, headers, rows, gz=False):
 
 
 def test_inaturalist_bulk_import_is_idempotent(database, tmp_path):
-    taxa = write_tsv(tmp_path / "taxa.csv.gz", ["taxon_id", "ancestry", "rank", "name", "active"], [[47170, "1", "kingdom", "Fungi", "true"], [555001, "1/47170", "species", "Amanita muscaria", "true"], [999999, "1/2", "species", "Animal", "true"]], True)
-    observations = write_tsv(tmp_path / "observations.csv.gz", ["observation_uuid", "observer_id", "taxon_id", "quality_grade"], [["obs-fungi", "15", "555001", "research"], ["obs-animal", "16", "999999", "research"]], True)
+    taxa = write_tsv(tmp_path / "taxa.csv.gz", ["taxon_id", "ancestry", "rank", "name", "active"], [[47170, "1", "kingdom", "Fungi", "true"], [555001, "1/47170", "species", "Amanita muscaria", "true"], [555002, "1/47170", "species", "Boletus edulis", "true"], [999999, "1/2", "species", "Animal", "true"]], True)
+    observations = write_tsv(tmp_path / "observations.csv.gz", ["observation_uuid", "observer_id", "taxon_id", "quality_grade"], [["obs-fungi", "15", "555001", "research"], ["obs-conflict", "15", "555002", "research"], ["obs-animal", "16", "999999", "research"]], True)
     observers = write_tsv(tmp_path / "observers.csv.gz", ["observer_id", "login", "name"], [["15", "mushroomfan", "Mushroom Fan"]], True)
-    photos = write_tsv(tmp_path / "photos.csv.gz", ["photo_uuid", "photo_id", "observation_uuid", "observer_id", "extension", "license"], [["photo-1", "987654", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-pdm", "987655", "obs-fungi", "15", "jpeg", "cc-pdm"], ["photo-2", "999999", "obs-animal", "16", "jpeg", "cc-by"]], True)
+    photos = write_tsv(tmp_path / "photos.csv.gz", ["photo_uuid", "photo_id", "observation_uuid", "observer_id", "extension", "license"], [["photo-1", "987654", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-pdm", "987655", "obs-fungi", "15", "jpeg", "cc-pdm"], ["photo-shared-a", "987656", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-shared-b", "987656", "obs-conflict", "15", "jpeg", "cc-by"], ["photo-2", "999999", "obs-animal", "16", "jpeg", "cc-by"]], True)
     for _ in range(2):
         with database() as db:
             import_bulk(db, taxa, observations, observers, photos, stage_dir=str(tmp_path / "stage"))
     with database() as db:
-        assert db.scalar(select(func.count(Taxon.id))) == 2
-        assert db.scalar(select(func.count(Image.id))) == 2
+        assert db.scalar(select(func.count(Taxon.id))) == 3
+        assert db.scalar(select(func.count(Image.id))) == 3
         image = db.scalar(select(Image).where(Image.source_image_id == "987654"))
         assert image.source_image_id == "987654"
         assert image.license == "CC BY"
         assert image.photographer == "Mushroom Fan"
         public_domain = db.scalar(select(Image).where(Image.source_image_id == "987655"))
         assert public_domain.license == "Public Domain Mark 1.0"
+        shared = db.scalar(select(Image).where(Image.source_image_id == "987656"))
+        assert shared.taxon_id is None
+        assert not shared.active
+        safe_taxon_id = db.scalar(select(Taxon.id).where(Taxon.inat_taxon_id == 555001))
+        upsert_inaturalist_images(
+            db,
+            [
+                {
+                    "taxon_id": safe_taxon_id,
+                    "source_taxon_id": None,
+                    "source": "inaturalist",
+                    "source_image_id": "987656",
+                    "source_observation_id": "single-association-on-incremental-page",
+                    "medium_url": shared.medium_url,
+                    "thumbnail_url": shared.thumbnail_url,
+                    "source_page_url": "https://www.inaturalist.org/observations/single-association-on-incremental-page",
+                    "photographer": shared.photographer,
+                    "license": shared.license,
+                    "attribution": shared.attribution,
+                    "display_eligible": True,
+                    "active": True,
+                    "source_last_seen_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            ],
+            taxon_conflicts=set(),
+            metadata_conflicts=set(),
+        )
+        db.refresh(shared)
+        assert shared.taxon_id is None and not shared.active
         state = db.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
         assert state.status == "success"
 
