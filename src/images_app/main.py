@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, case, func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -29,6 +29,8 @@ from images_app.security import (
     verify_password,
 )
 from images_app.importers.common import insert_ignore_rows
+from images_app.importers.common import refresh_image_counts
+from images_app.importers.mushroom_observer import recompute_mo_image_taxa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("images_app")
@@ -52,6 +54,22 @@ app.add_middleware(
     https_only=settings.secure_cookies,
 )
 app.mount("/static", StaticFiles(directory=str(PACKAGE_ROOT / "static")), name="static")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        "img-src 'self' https://inaturalist-open-data.s3.amazonaws.com https://*.inaturalist.org "
+        "https://mushroomobserver.org https://*.mushroomobserver.org",
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 
 def context(request: Request, db: Session, **values):
@@ -98,7 +116,13 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
         .outerjoin(my_vote, and_(my_vote.image_id == Image.id, my_vote.taxon_id == taxon.id, my_vote.user_id == (user.id if user else -1)))
         .where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True))
         .group_by(Image.id, my_vote.rank)
-        .order_by(rank_one.desc(), picked_by.desc(), Image.id.asc())
+        .order_by(
+            case((my_vote.rank.is_not(None), 0), else_=1),
+            my_vote.rank.asc(),
+            rank_one.desc(),
+            picked_by.desc(),
+            Image.id.asc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -118,7 +142,12 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
 
 
 @app.get("/healthz", include_in_schema=False)
-def healthz():
+def healthz(db: Session = Depends(get_db)):
+    try:
+        db.execute(select(1))
+    except SQLAlchemyError as exc:
+        logger.exception("Health check failed: database unavailable")
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
     return {"status": "ok"}
 
 
@@ -138,11 +167,28 @@ def directory(
     request: Request,
     q: str = "",
     letter: str = "",
+    rank: str = "species",
     page: int = 1,
     db: Session = Depends(get_db),
 ):
     page = max(1, page)
+    rank = rank.strip().lower()[:60] or "all"
+    available_ranks = db.scalars(
+        select(Taxon.rank)
+        .where(
+            fungi_filter(),
+            Taxon.active.is_(True),
+            Taxon.image_count > 0,
+            Taxon.rank.is_not(None),
+        )
+        .distinct()
+        .order_by(Taxon.rank)
+    ).all()
+    if rank != "all" and rank not in available_ranks:
+        rank = "species" if "species" in available_ranks else "all"
     query = select(Taxon).where(fungi_filter(), Taxon.active.is_(True), Taxon.image_count > 0)
+    if rank != "all":
+        query = query.where(func.lower(Taxon.rank) == rank)
     normalized = q.strip()[:120]
     if normalized:
         exact_alias = select(TaxonAlias.taxon_id).where(func.lower(TaxonAlias.name) == normalized.lower())
@@ -163,7 +209,18 @@ def directory(
     return templates.TemplateResponse(
         request,
         "directory.html",
-        context(request, db, taxa=taxa, q=normalized, letter=letter, page=page, page_count=max(1, (total + 49) // 50), total=total),
+        context(
+            request,
+            db,
+            taxa=taxa,
+            q=normalized,
+            letter=letter,
+            rank=rank,
+            available_ranks=available_ranks,
+            page=page,
+            page_count=max(1, (total + 49) // 50),
+            total=total,
+        ),
     )
 
 
@@ -256,6 +313,7 @@ def login(
 ):
     require_csrf(request, csrf)
     ip = request.client.host if request.client else "unknown"
+    enforce_rate_limit(db, "login_ip", ip, maximum=30, seconds=900)
     enforce_rate_limit(db, "login", f"{ip}:{email.strip().lower()}", maximum=10, seconds=900)
     user = db.scalar(select(User).where(func.lower(User.email) == email.strip().lower(), User.is_active.is_(True)))
     valid = bool(user and verify_password(user.password_hash, password))
@@ -341,6 +399,46 @@ def move_vote(
     return RedirectResponse(destination, status_code=303)
 
 
+@app.post("/taxon/{taxon_id}/reorder", response_class=HTMLResponse)
+def reorder_votes(
+    request: Request,
+    taxon_id: int,
+    image_ids: list[int] = Form(),
+    page: int = Form(default=1),
+    csrf: str = Form(),
+    db: Session = Depends(get_db),
+):
+    require_csrf(request, csrf)
+    user = require_user(request, db)
+    taxon = db.get(Taxon, taxon_id)
+    if not taxon:
+        raise HTTPException(404, "Taxon not found")
+    if not image_ids or len(image_ids) > 72 or len(image_ids) != len(set(image_ids)):
+        raise HTTPException(422, "Provide the selected image order from one gallery page.")
+
+    db.execute(select(User.id).where(User.id == user.id).with_for_update())
+    votes = list(
+        db.scalars(
+            select(Vote)
+            .where(Vote.user_id == user.id, Vote.taxon_id == taxon.id)
+            .order_by(Vote.rank)
+        ).all()
+    )
+    votes_by_image = {vote.image_id: vote for vote in votes}
+    if any(image_id not in votes_by_image for image_id in image_ids):
+        raise HTTPException(422, "The order includes an image you have not selected.")
+    ordered_set = set(image_ids)
+    slots = [index for index, vote in enumerate(votes) if vote.image_id in ordered_set]
+    for index, image_id in zip(slots, image_ids, strict=True):
+        votes[index] = votes_by_image[image_id]
+    _persist_vote_order(db, votes)
+    db.commit()
+    page = max(1, page)
+    if request.headers.get("HX-Request") == "true":
+        return render_gallery(db, request, taxon, user, page)
+    return RedirectResponse(taxon_url(taxon) + (f"?page={page}" if page > 1 else ""), status_code=303)
+
+
 def _persist_vote_order(db: Session, votes: list[Vote]) -> None:
     if not votes:
         return
@@ -416,11 +514,8 @@ def map_source_taxon(
         [{"taxon_id": taxon.id, "name": source_taxon.original_name, "source": "Mushroom Observer"}],
         ["taxon_id", "name", "source"],
     )
-    db.execute(
-        update(Image)
-        .where(Image.source_taxon_id == source_taxon.id)
-        .values(taxon_id=taxon.id, active=Image.display_eligible, updated_at=utcnow())
-    )
+    changed_taxa = recompute_mo_image_taxa(db, source_taxon_id=source_taxon.id)
+    refresh_image_counts(db, changed_taxa)
     db.commit()
     return RedirectResponse("/admin", status_code=303)
 

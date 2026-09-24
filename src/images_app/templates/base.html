@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf }}">
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}'>
   <title>{% block title %}Dikarya Images{% endblock %}</title>
   <link rel="stylesheet" href="/static/site.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <script src="/static/htmx-2.0.4.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>

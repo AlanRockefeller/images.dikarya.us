@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from images_app.models import Image, SourceTaxon, TaxonAlias, User, Vote
+from images_app.models import Image, ImageSourceTaxon, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote
+from images_app.db import get_db
+from images_app.main import app
 from images_app.security import hash_password
 from tests.conftest import csrf_from, register_client
 
@@ -75,10 +77,16 @@ def test_reorder_and_two_users_are_independent(client, database, taxon, add_imag
         csrf = csrf_from(response.text)
     moved = client.post(f"/taxon/{taxon}/move", data={"csrf": csrf, "image_id": second, "direction": "up"}, headers={"HX-Request": "true"})
     assert rank_badges(moved.text)
+    moved = client.post(
+        f"/taxon/{taxon}/reorder",
+        data={"csrf": csrf, "page": 1, "image_ids": [first, second]},
+        headers={"HX-Request": "true"},
+    )
+    assert moved.status_code == 200
     with database() as db:
         first_user = db.scalar(select(User).where(User.email == "mina@example.org"))
         rows = db.scalars(select(Vote).where(Vote.user_id == first_user.id).order_by(Vote.rank)).all()
-        assert [row.image_id for row in rows] == [second, first]
+        assert [row.image_id for row in rows] == [first, second]
 
     client.post("/logout", data={"csrf": csrf_from(client.get("/").text)})
     new_csrf = register_client(client, "Sol", "sol@example.org")
@@ -140,6 +148,67 @@ def test_directory_searches_alias_and_taxon_page(client, database, taxon, add_im
     assert client.get(taxon_path(client, taxon)).status_code == 200
 
 
+def test_directory_defaults_to_species_and_all_ranks_is_available(client, database, taxon, add_image):
+    add_image(502)
+    with database() as db:
+        species = db.get(Taxon, taxon)
+        species.image_count = 1
+        fungi = db.get(Taxon, species.parent_id)
+        fungi.image_count = 1
+        db.commit()
+        fungi_id = fungi.id
+    add_image(503, fungi_id)
+    default_page = client.get("/taxa")
+    assert "Amanita muscaria" in default_page.text
+    assert f'href="/taxon/{fungi_id}"' not in default_page.text
+    all_ranks_page = client.get("/taxa?rank=all")
+    assert f'href="/taxon/{fungi_id}"' in all_ranks_page.text
+
+
+def test_healthz_checks_database_and_static_assets_are_local(client):
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    homepage = client.get("/")
+    assert "/static/htmx-2.0.4.min.js" in homepage.text
+    assert "unpkg.com" not in homepage.text
+
+
+def test_healthz_returns_unavailable_when_database_query_fails(client):
+    previous = app.dependency_overrides[get_db]
+
+    class BrokenDatabase:
+        def execute(self, _statement):
+            raise SQLAlchemyError("database failure detail")
+
+    def broken_database():
+        yield BrokenDatabase()
+
+    app.dependency_overrides[get_db] = broken_database
+    try:
+        response = client.get("/healthz")
+    finally:
+        app.dependency_overrides[get_db] = previous
+    assert response.status_code == 503
+    assert response.json() == {"detail": "database unavailable"}
+
+
+def test_login_has_a_separate_per_ip_rate_limit(client):
+    csrf = csrf_from(client.get("/login").text)
+    for index in range(30):
+        response = client.post(
+            "/login",
+            data={"csrf": csrf, "email": f"user-{index}@example.org", "password": "wrong"},
+        )
+        assert response.status_code == 401
+    response = client.post(
+        "/login",
+        data={"csrf": csrf, "email": "another@example.org", "password": "wrong"},
+    )
+    assert response.status_code == 429
+
+
 def test_gallery_pagination(client, database, taxon, add_image):
     for i in range(74):
         add_image(600 + i)
@@ -177,20 +246,34 @@ def test_admin_can_manually_map_unresolved_mushroom_observer_name(client, databa
             normalized_name="amanita muscaria",
             mapping_status="unresolved",
         )
-        db.add(source_taxon)
+        second_name = SourceTaxon(
+            source="mushroom_observer",
+            source_taxon_id="mo-name-101",
+            original_name="Amanita muscaria (alternate record)",
+            normalized_name="amanita muscaria alternate record",
+            mapping_status="unresolved",
+        )
+        db.add_all([source_taxon, second_name])
         db.flush()
         image = Image(
             source="mushroom_observer",
             source_image_id="mo-image-200",
-            source_taxon_id=source_taxon.id,
             medium_url="https://mushroomobserver.org/images/640/200.jpg",
             source_page_url="https://mushroomobserver.org/observations/300",
             display_eligible=True,
             active=False,
         )
         db.add(image)
+        db.flush()
+        db.add_all(
+            [
+                ImageSourceTaxon(image_id=image.id, source_taxon_id=source_taxon.id),
+                ImageSourceTaxon(image_id=image.id, source_taxon_id=second_name.id),
+            ]
+        )
         db.commit()
         source_taxon_id = source_taxon.id
+        second_source_taxon_id = second_name.id
         image_id = image.id
 
     page = client.get("/admin")
@@ -206,5 +289,21 @@ def test_admin_can_manually_map_unresolved_mushroom_observer_name(client, databa
         image = db.get(Image, image_id)
         assert mapped.taxon_id == taxon
         assert mapped.mapping_method == "manual"
+        assert image.taxon_id is None and not image.active
+
+    response = client.post(
+        f"/admin/source-taxon/{second_source_taxon_id}/map",
+        data={"csrf": csrf, "taxon_id": taxon},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with database() as db:
+        image = db.get(Image, image_id)
+        taxon_record = db.get(Taxon, taxon)
+        associations = db.scalars(
+            select(ImageSourceTaxon).where(ImageSourceTaxon.image_id == image_id)
+        ).all()
         assert image.taxon_id == taxon and image.active
+        assert len(associations) == 2
+        assert taxon_record.image_count == 1
         assert db.scalar(select(TaxonAlias.id).where(TaxonAlias.taxon_id == taxon, TaxonAlias.name == "Amanita muscaria"))

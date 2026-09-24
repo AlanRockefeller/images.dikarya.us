@@ -1,9 +1,10 @@
-<section id="gallery" class="gallery-region" aria-live="polite" aria-label="Image gallery">
+<section id="gallery" class="gallery-region" aria-live="polite" aria-label="Image gallery" data-reorder-url="/taxon/{{ taxon.id }}/reorder" data-page="{{ page }}">
+  {% if user %}<form id="reorder-votes-form" hidden><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="page" value="{{ page }}"></form>{% endif %}
   {% if images %}
     <div class="gallery-grid">
       {% for row in images %}
         {% set image = row[0] %}{% set picked_by = row[1] %}{% set rank_one = row[2] %}{% set average_rank = row[3] %}{% set my_rank = row[4] %}
-        <article class="image-card {% if my_rank %}is-selected{% endif %}">
+        <article class="image-card {% if my_rank %}is-selected{% endif %}" {% if my_rank %}data-image-id="{{ image.id }}"{% endif %}>
           <div class="image-frame">
             <img src="{{ image.medium_url }}" {% if image.thumbnail_url %}srcset="{{ image.thumbnail_url }} 240w, {{ image.medium_url }} 500w" sizes="(max-width: 620px) 100vw, (max-width: 1000px) 50vw, 33vw"{% endif %} loading="lazy" decoding="async" alt="{{ image.attribution or image.photographer or ('Photograph for ' ~ taxon.scientific_name) }}">
             <span class="image-unavailable" hidden>Image temporarily unavailable</span>
@@ -24,6 +25,7 @@
             <div class="aggregate-line"><span>{{ rank_one }} first-place · {{ picked_by }} voters</span>{% if average_rank %}<span>avg. {{ "%.1f"|format(average_rank) }}</span>{% endif %}</div>
             {% if user and my_rank %}<div class="reorder-controls">
               <span>Your rank {{ my_rank }}</span>
+              <button class="drag-handle" type="button" draggable="true" aria-label="Drag to reorder image rank {{ my_rank }}" title="Drag to reorder">⠿</button>
               <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="up"><input type="hidden" name="page" value="{{ page }}"><button type="submit" aria-label="Move image up" {% if my_rank == 1 %}disabled{% endif %}>↑</button></form>
               <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="down"><input type="hidden" name="page" value="{{ page }}"><button type="submit" aria-label="Move image down">↓</button></form>
             </div>{% endif %}
