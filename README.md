@@ -110,7 +110,7 @@ If resuming after an interrupted deployment, skip the virtual-environment and `p
 
 The daily unit streams the official nightly MO CSVs and runs the bounded iNaturalist API synchronizer. The monthly reconcile unit streams full iNaturalist metadata, including the large photo metadata table, and stores only the taxonomy archive and bounded join state. Check available bandwidth before enabling the monthly timer. Run the initial imports manually and review their results before enabling unattended schedules. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
 
-After deployment, create the first administrator interactively with `sudo -u images /var/www/images.dikarya.us/app/.venv/bin/python -m images_app.cli create-admin`.
+After deployment, create the first administrator interactively with `sudo -u images env APP_ROOT=/var/www/images.dikarya.us/app PYTHONPATH=/var/www/images.dikarya.us/app/src /var/www/images.dikarya.us/app/.venv/bin/python -m images_app.cli create-admin`.
 
 ## Nginx and systemd
 
