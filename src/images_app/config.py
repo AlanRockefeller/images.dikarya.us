@@ -6,7 +6,18 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-APP_ROOT = Path(__file__).resolve().parents[2]
+def _project_root() -> Path:
+    configured = os.getenv("APP_ROOT")
+    if configured:
+        return Path(configured).resolve()
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    return Path.cwd().resolve()
+
+
+APP_ROOT = _project_root()
+PACKAGE_ROOT = Path(__file__).resolve().parent
 if "APP_ENV" not in os.environ:
     load_dotenv(APP_ROOT / ".env")
 

@@ -75,11 +75,13 @@ The production service runs as Unix user `images`, binds only to `127.0.0.1:8017
 
 Example service, timer, and nginx files are in `deploy/`. Before installing them, inspect the host's active vhosts and units. Back up any file being changed, run `nginx -t`, then reload nginx. The singular hostname redirects with `$request_uri` to the plural canonical HTTPS host. The nginx example expects a certificate covering both `images.dikarya.us` and `image.dikarya.us`; issue/expand it with the host's existing Certbot setup after DNS points at the server. Do not reload until certificate paths exist and `nginx -t` succeeds.
 
-Example install flow (run as an administrator after reviewing the sample files):
+Example install flow (run as an administrator after reviewing the sample files). The recursive ownership and mode commands are idempotent; let each finish before continuing. They leave `alan` as owner and give `images` read/execute access only.
 
 ```sh
 python3.12 -m venv /var/www/images.dikarya.us/app/.venv
-/var/www/images.dikarya.us/app/.venv/bin/pip install /var/www/images.dikarya.us/app
+systemctl stop images.service images-import-daily.timer images-import-reconcile.timer
+systemctl stop images-import-daily.service images-import-reconcile.service
+/var/www/images.dikarya.us/app/.venv/bin/pip install --force-reinstall /var/www/images.dikarya.us/app
 chgrp -R images /var/www/images.dikarya.us/app
 chmod -R g+rX,g-w,o-rwx /var/www/images.dikarya.us/app
 install -o root -g root -m 0644 deploy/images-migrate.service /etc/systemd/system/images-migrate.service
@@ -89,6 +91,7 @@ install -o root -g root -m 0644 deploy/images-import-daily.timer /etc/systemd/sy
 install -o root -g root -m 0644 deploy/images-import-reconcile.service /etc/systemd/system/images-import-reconcile.service
 install -o root -g root -m 0644 deploy/images-import-reconcile.timer /etc/systemd/system/images-import-reconcile.timer
 systemctl daemon-reload
+systemctl reset-failed images.service images-import-daily.service images-import-reconcile.service
 systemctl start images-migrate.service
 systemctl enable --now images.service
 # Run the initial imports manually, then review their status.
@@ -98,6 +101,8 @@ journalctl -fu images-import-reconcile.service
 # After the initial reconciliation succeeds, enable unattended schedules.
 systemctl enable --now images-import-daily.timer images-import-reconcile.timer
 ```
+
+`journalctl -fu` follows the log and does not exit on its own. Pressing Ctrl-C there stops only the log viewer; a job started with `systemctl start --no-block` continues in the background. Check it with `systemctl status images-import-reconcile.service`.
 
 The daily unit streams the official nightly MO CSVs and runs the bounded iNaturalist API synchronizer. The monthly reconcile unit streams full iNaturalist metadata, including the large photo metadata table, and stores only the taxonomy archive and bounded join state. Check available bandwidth before enabling the monthly timer. Run the initial imports manually and review their results before enabling unattended schedules. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
 

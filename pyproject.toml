@@ -27,6 +27,9 @@ test = ["pytest>=8,<9", "pytest-cov>=5,<7"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+images_app = ["templates/*.html", "static/*.css", "static/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

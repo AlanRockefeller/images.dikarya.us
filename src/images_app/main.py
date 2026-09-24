@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 from starlette.middleware.sessions import SessionMiddleware
 
-from images_app.config import APP_ROOT, settings
+from images_app.config import PACKAGE_ROOT, settings
 from images_app.db import get_db
 from images_app.models import Image, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote, utcnow
 from images_app.security import (
@@ -33,7 +33,7 @@ from images_app.importers.common import insert_ignore_rows
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("images_app")
 
-TEMPLATE_DIR = APP_ROOT / "src" / "images_app" / "templates"
+TEMPLATE_DIR = PACKAGE_ROOT / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 
@@ -51,7 +51,7 @@ app.add_middleware(
     same_site="lax",
     https_only=settings.secure_cookies,
 )
-app.mount("/static", StaticFiles(directory=str(APP_ROOT / "src" / "images_app" / "static")), name="static")
+app.mount("/static", StaticFiles(directory=str(PACKAGE_ROOT / "static")), name="static")
 
 
 def context(request: Request, db: Session, **values):
