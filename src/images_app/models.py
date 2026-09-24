@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -109,6 +110,7 @@ class SourceTaxon(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     taxon: Mapped[Taxon | None] = relationship()
+    image_associations: Mapped[list[ImageSourceTaxon]] = relationship(back_populates="source_taxon")
 
 
 class Image(Base):
@@ -139,6 +141,30 @@ class Image(Base):
 
     taxon: Mapped[Taxon | None] = relationship()
     source_taxon: Mapped[SourceTaxon | None] = relationship()
+    source_taxa: Mapped[list[ImageSourceTaxon]] = relationship(
+        back_populates="image", cascade="all, delete-orphan"
+    )
+
+
+class ImageSourceTaxon(Base):
+    """Every source name attached to an externally hosted image."""
+
+    __tablename__ = "image_source_taxa"
+    __table_args__ = (
+        PrimaryKeyConstraint("image_id", "source_taxon_id", name="pk_image_source_taxa"),
+        Index("ix_image_source_taxa_taxon_image", "source_taxon_id", "image_id"),
+    )
+
+    image_id: Mapped[int] = mapped_column(
+        ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    source_taxon_id: Mapped[int] = mapped_column(
+        ForeignKey("source_taxa.id", ondelete="CASCADE"), nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    image: Mapped[Image] = relationship(back_populates="source_taxa")
+    source_taxon: Mapped[SourceTaxon] = relationship(back_populates="image_associations")
 
 
 class Vote(Base):

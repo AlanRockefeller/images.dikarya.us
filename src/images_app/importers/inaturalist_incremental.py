@@ -26,24 +26,40 @@ PAGE_SIZE = 200
 MAX_REQUESTS_PER_RUN = 1000
 
 
-def _cursor_from_state(session: Session, started: datetime) -> tuple[str, int]:
+def _cursor_from_state(
+    session: Session, started: datetime
+) -> tuple[str, int, str, str | None, bool]:
     state = session.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
     if state and state.cursor:
         try:
             data = json.loads(state.cursor)
             if isinstance(data, dict) and data.get("since"):
-                return str(data["since"]), int(data.get("id_above", 0))
+                id_above = int(data.get("id_above", 0))
+                phase = data.get("phase")
+                if phase not in {"window", "resume", "replay"}:
+                    # Older partial cursors were an ID continuation without a
+                    # replay phase; replay the same update window once caught up.
+                    phase = "resume" if id_above else "window"
+                    legacy = True
+                else:
+                    legacy = False
+                return (
+                    str(data["since"]),
+                    id_above,
+                    phase,
+                    str(data["replay_started"]) if data.get("replay_started") else None,
+                    legacy,
+                )
+            if isinstance(data, str):
+                return data, 0, "window", None, True
         except (json.JSONDecodeError, ValueError, TypeError):
-            try:
-                return state.cursor, 0
-            except Exception:
-                pass
+            pass
     if state and state.last_success_at:
         last_success = state.last_success_at
         if last_success.tzinfo is None:
             last_success = last_success.replace(tzinfo=timezone.utc)
-        return (last_success - timedelta(days=1)).isoformat(), 0
-    return (started - timedelta(days=365)).isoformat(), 0
+        return (last_success - timedelta(days=1)).isoformat(), 0, "window", None, False
+    return (started - timedelta(days=365)).isoformat(), 0, "window", None, False
 
 
 def _in_fungi(taxon: dict, root_id: int) -> tuple[bool, str, list[int]]:
@@ -192,18 +208,23 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
 
 
 def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_taxon_id, max_requests: int = MAX_REQUESTS_PER_RUN, client: httpx.Client | None = None) -> int:
-    previous_state = session.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
     started = utcnow()
-    since, id_above = _cursor_from_state(session, started)
-    # Keep a small overlap after every completed run; upserts make this safe and it closes
-    # the window for records edited while a multi-page request is running.
+    since, id_above, phase, replay_started, legacy_cursor = _cursor_from_state(session, started)
     try:
         since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-        if id_above == 0:
-            since = (since_dt - timedelta(days=1)).isoformat()
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
+        if legacy_cursor and phase == "window":
+            # Legacy successful cursors stored the run start without the overlap.
+            since_dt -= timedelta(days=1)
+        since = since_dt.astimezone(timezone.utc).isoformat()
     except ValueError:
         since = (started - timedelta(days=365)).isoformat()
         id_above = 0
+        phase = "window"
+        replay_started = None
+    if phase == "replay" and replay_started is None:
+        replay_started = started.isoformat()
     started = begin_sync(session, "inaturalist")
     processed = 0
     page_requests = 0
@@ -234,27 +255,45 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
             id_map = _taxon_ids_for_page(session, results, root_taxon_id, started)
             observation_ids = []
             image_rows = []
+            touched_taxa: set[int] = set()
             for observation in results:
                 try:
                     obs_id = int(observation["id"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                observation_ids.append(str(obs_id))
+                try:
                     ext_taxon = int((observation.get("taxon") or {}).get("id"))
                 except (KeyError, ValueError, TypeError):
                     continue
                 internal_taxon = id_map.get(ext_taxon)
                 if not internal_taxon:
                     continue
-                observation_ids.append(str(obs_id))
                 for photo in observation.get("photos") or []:
                     image = _make_image(photo, observation, internal_taxon, started)
                     if image:
                         image_rows.append(image)
             if observation_ids:
+                touched_taxa.update(
+                    taxon_id
+                    for taxon_id in session.scalars(
+                        select(Image.taxon_id)
+                        .where(
+                            Image.source == "inaturalist",
+                            Image.source_observation_id.in_(observation_ids),
+                            Image.taxon_id.is_not(None),
+                        )
+                        .distinct()
+                    ).all()
+                    if taxon_id is not None
+                )
                 session.execute(
                     update(Image)
                     .where(Image.source == "inaturalist", Image.source_observation_id.in_(observation_ids))
                     .values(active=False, updated_at=started)
                 )
             if image_rows:
+                touched_taxa.update(row["taxon_id"] for row in image_rows)
                 upsert_rows(
                     session,
                     Image,
@@ -262,6 +301,7 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
                     ["source", "source_image_id"],
                     ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
                 )
+            refresh_image_counts(session, touched_taxa)
             processed += len(results)
             page_ids = [int(item["id"]) for item in results if str(item.get("id", "")).isdigit()]
             if not page_ids:
@@ -275,8 +315,16 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
             if page_requests < max_requests:
                 time.sleep(1.05)
         if not complete:
-            refresh_image_counts(session)
-            next_cursor = json.dumps({"since": since, "id_above": last_id})
+            partial_phase = "resume" if phase == "window" else phase
+            next_cursor = json.dumps(
+                {
+                    "version": 2,
+                    "since": since,
+                    "id_above": last_id,
+                    "phase": partial_phase,
+                    "replay_started": replay_started if partial_phase == "replay" else None,
+                }
+            )
             state = session.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
             state.status = "partial"
             state.last_started_at = started
@@ -286,8 +334,41 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
             state.error_message = f"Paused at the {max_requests}-request run limit; will resume from cursor."
             session.commit()
             return processed
-        refresh_image_counts(session)
-        next_cursor = json.dumps({"since": started.isoformat(), "id_above": 0})
+
+        if phase == "resume":
+            # The ascending-ID continuation may have skipped low-ID observations
+            # edited while the backlog was being paged. Replay this whole window
+            # from ID zero before advancing its time cursor.
+            state = session.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
+            state.status = "partial"
+            state.last_started_at = started
+            state.last_completed_at = utcnow()
+            state.records_processed = processed
+            state.cursor = json.dumps(
+                {
+                    "version": 2,
+                    "since": since,
+                    "id_above": 0,
+                    "phase": "replay",
+                    "replay_started": None,
+                }
+            )
+            state.error_message = "Backlog scan complete; replaying its full update window for changes to earlier IDs."
+            session.commit()
+            return processed
+
+        completed_window_start = replay_started if phase == "replay" else started.isoformat()
+        completed_dt = datetime.fromisoformat(completed_window_start.replace("Z", "+00:00"))
+        if completed_dt.tzinfo is None:
+            completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+        next_cursor = json.dumps(
+            {
+                "version": 2,
+                "since": (completed_dt - timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+                "id_above": 0,
+                "phase": "window",
+            }
+        )
         finish_sync(session, "inaturalist", started, processed, cursor=next_cursor)
         return processed
     except BaseException as exc:

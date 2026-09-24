@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import json
+import sqlite3
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -13,10 +15,15 @@ from sqlalchemy import func, select
 
 from images_app.importers.inaturalist import import_bulk
 from images_app.importers.inaturalist_incremental import incremental_sync
-from images_app.importers.mushroom_observer import import_exports
+from images_app.importers.mushroom_observer import (
+    _sqlite_stage,
+    _write_mo_source_taxa,
+    import_exports,
+    recompute_mo_image_taxa,
+)
 import images_app.importers.common as importer_common
 from images_app.importers.common import stream_tsv
-from images_app.models import Image, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote
+from images_app.models import Image, ImageSourceTaxon, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote
 
 
 def write_tsv(path, headers, rows, gz=False):
@@ -111,11 +118,58 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
     with database() as db:
         image = db.scalar(select(Image).where(Image.source_image_id == "880001"))
         state = db.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
+        imported_taxon = db.get(Taxon, taxon)
         assert count == 1
         assert image.taxon_id == taxon
         assert image.medium_url.endswith("/medium.jpeg")
         assert state.status == "success"
         assert '"since"' in state.cursor
+        assert imported_taxon.image_count == 1
+
+
+def test_incremental_inaturalist_replays_window_after_capped_backlog(database, taxon):
+    request_ids = []
+
+    def respond(request):
+        id_above = int(request.url.params["id_above"])
+        request_ids.append(id_above)
+        if len(request_ids) == 1:
+            results = [
+                {
+                    "id": observation_id,
+                    "taxon": {
+                        "id": 555001,
+                        "name": "Amanita muscaria",
+                        "rank": "species",
+                        "ancestry": "1/47170",
+                    },
+                    "photos": [],
+                }
+                for observation_id in range(1, 201)
+            ]
+        else:
+            results = []
+        return httpx.Response(200, json={"results": results})
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    with database() as db:
+        assert incremental_sync(db, client=client, max_requests=1) == 200
+    with database() as db:
+        cursor = json.loads(db.scalar(select(SyncState.cursor).where(SyncState.source == "inaturalist")))
+        assert cursor["phase"] == "resume"
+        assert cursor["id_above"] == 200
+        assert incremental_sync(db, client=client, max_requests=1) == 0
+    with database() as db:
+        cursor = json.loads(db.scalar(select(SyncState.cursor).where(SyncState.source == "inaturalist")))
+        assert cursor["phase"] == "replay"
+        assert cursor["id_above"] == 0
+        assert incremental_sync(db, client=client, max_requests=1) == 0
+    client.close()
+    assert request_ids == [0, 200, 0]
+    with database() as db:
+        state = db.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
+        assert state.status == "success"
+        assert json.loads(state.cursor)["phase"] == "window"
 
 
 def test_mushroom_observer_import_idempotency_and_unresolved_name(database, tmp_path):
@@ -133,18 +187,18 @@ def test_mushroom_observer_import_idempotency_and_unresolved_name(database, tmp_
         [["100", "Amanita muscaria", "(L.) Lam.", "0", "NULL", "NULL", "400"], ["101", "Mystery fungus", "Auth.", "0", "NULL", "NULL", "400"]],
     )
     observations = write_tsv(tmp_path / "observations.csv", ["id", "name_id"], [["800", "100"], ["801", "101"]])
-    image_observations = write_tsv(tmp_path / "images_observations.csv", ["image_id", "observation_id"], [["900", "800"], ["901", "801"]])
+    image_observations = write_tsv(tmp_path / "images_observations.csv", ["image_id", "observation_id"], [["900", "800"], ["901", "801"], ["902", "800"], ["902", "801"]])
     images = write_tsv(
         tmp_path / "images.csv",
         ["id", "content_type", "copyright_holder", "license", "ok_for_export"],
-        [["900", "image/jpeg", "Photo Person", "Creative Commons Wikipedia Compatible v3.0", "1"], ["901", "image/jpeg", "Unknown Person", "All rights reserved", "1"]],
+        [["900", "image/jpeg", "Photo Person", "Creative Commons Wikipedia Compatible v3.0", "1"], ["901", "image/jpeg", "Unknown Person", "All rights reserved", "1"], ["902", "image/jpeg", "Shared Photographer", "Creative Commons Wikipedia Compatible v3.0", "1"]],
     )
     kwargs = dict(observations_path=observations, image_observations_path=image_observations, images_path=images, names_path=names, stage_dir=str(tmp_path / "stage"))
     for _ in range(2):
         with database() as db:
             import_exports(db, **kwargs)
     with database() as db:
-        assert db.scalar(select(func.count(Image.id))) == 2
+        assert db.scalar(select(func.count(Image.id))) == 3
         assert db.scalar(select(func.count(SourceTaxon.id))) == 2
         unresolved = db.scalar(select(SourceTaxon).where(SourceTaxon.original_name == "Mystery fungus"))
         assert unresolved.mapping_status == "unresolved"
@@ -152,8 +206,38 @@ def test_mushroom_observer_import_idempotency_and_unresolved_name(database, tmp_
         assert resolved.taxon_id == accepted_id
         eligible = db.scalar(select(Image).where(Image.source_image_id == "900", Image.source == "mushroom_observer"))
         excluded = db.scalar(select(Image).where(Image.source_image_id == "901", Image.source == "mushroom_observer"))
+        shared = db.scalar(select(Image).where(Image.source_image_id == "902", Image.source == "mushroom_observer"))
         assert eligible.display_eligible and eligible.active, (eligible.taxon_id, eligible.source_taxon_id, resolved.id)
         assert not excluded.display_eligible and not excluded.active
+        assert shared.taxon_id is None and not shared.active
+        assert db.scalar(select(func.count(ImageSourceTaxon.image_id)).where(ImageSourceTaxon.image_id == shared.id)) == 2
+        unresolved.taxon_id = accepted_id
+        unresolved.mapping_status = "mapped"
+        unresolved.mapping_method = "manual"
+        changed_taxa = recompute_mo_image_taxa(db, source_taxon_id=unresolved.id)
+        from images_app.importers.common import refresh_image_counts
+        refresh_image_counts(db, changed_taxa)
+        db.commit()
+        assert shared.taxon_id == accepted_id and shared.active
+        assert db.get(Taxon, accepted_id).image_count == 2
+
+
+def test_mushroom_observer_name_lookups_are_batched_below_sqlite_variable_limit(database, tmp_path):
+    stage = _sqlite_stage(tmp_path / "many-mo-names.sqlite3")
+    stage.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    names = [(str(index), f"Unmapped name {index}", "0", "", "") for index in range(1200)]
+    observations = [(f"obs-{index}", str(index)) for index in range(1200)]
+    links = [("shared-image", f"obs-{index}") for index in range(1200)]
+    stage.executemany("INSERT INTO mo_names VALUES (?,?,?,?,?)", names)
+    stage.executemany("INSERT INTO mo_observations VALUES (?,?)", observations)
+    stage.executemany("INSERT INTO image_observations VALUES (?,?)", links)
+    stage.execute("INSERT INTO mo_images VALUES (?,?,?,?,?)", ("shared-image", "image/jpeg", "", "", "1"))
+    stage.commit()
+    with database() as db:
+        _write_mo_source_taxa(db, stage, datetime.now(timezone.utc))
+        assert db.scalar(select(func.count(SourceTaxon.id))) == 1200
+    assert stage.execute("SELECT count(*) FROM mapped_names").fetchone()[0] == 1200
+    stage.close()
 
 
 def test_mushroom_observer_uses_known_taxon_alias(database, tmp_path):

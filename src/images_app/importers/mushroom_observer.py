@@ -4,10 +4,11 @@ import argparse
 import logging
 import sqlite3
 import tempfile
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from images_app.config import settings
@@ -24,7 +25,7 @@ from images_app.importers.common import (
     stream_tsv,
     upsert_rows,
 )
-from images_app.models import Image, SourceTaxon, Taxon, TaxonAlias
+from images_app.models import Image, ImageSourceTaxon, SourceTaxon, SyncState, Taxon, TaxonAlias, utcnow
 
 logger = logging.getLogger("images_app.importers.mushroom_observer")
 
@@ -164,7 +165,7 @@ def _write_mo_source_taxa(session: Session, stage: sqlite3.Connection, started: 
     if not used:
         return
     manual = {}
-    values = list(used)
+    values = sorted(used)
     for offset in range(0, len(values), 500):
         manual.update(
             dict(
@@ -178,35 +179,41 @@ def _write_mo_source_taxa(session: Session, stage: sqlite3.Connection, started: 
                 ).all()
             )
         )
-    names_cursor = stage.execute(
-        "SELECT id,text_name,correct_spelling_id,synonym_id FROM mo_names WHERE id IN (" + ",".join("?" for _ in values) + ")",
-        values,
-    )
     mapping_batch: list[dict] = []
     stage_batch: list[tuple] = []
     alias_batch: list[dict] = []
-    for name_id, original, correct_spelling_id, synonym_id in names_cursor:
-        if not original:
-            continue
-        taxon_id, status, method = _map_name(stage, str(name_id), original, correct_spelling_id or "", synonym_id or "")
-        if str(name_id) in manual:
-            taxon_id, status, method = int(manual[str(name_id)]), "mapped", "manual"
-        mapping_batch.append(
-            {
-                "source": "mushroom_observer",
-                "source_taxon_id": str(name_id),
-                "original_name": original,
-                "normalized_name": normalized_name(original),
-                "taxon_id": taxon_id,
-                "mapping_status": status,
-                "mapping_method": method,
-                "updated_at": started,
-            }
+    for offset in range(0, len(values), 500):
+        name_ids = values[offset : offset + 500]
+        names_cursor = stage.execute(
+            "SELECT id,text_name,correct_spelling_id,synonym_id FROM mo_names WHERE id IN ("
+            + ",".join("?" for _ in name_ids)
+            + ")",
+            name_ids,
         )
-        stage_batch.append((str(name_id), taxon_id, status, method, original, normalized_name(original)))
-        if taxon_id is not None:
-            alias_batch.append({"taxon_id": taxon_id, "name": original.strip(), "source": "Mushroom Observer"})
-        if len(mapping_batch) >= 500:
+        for name_id, original, correct_spelling_id, synonym_id in names_cursor:
+            if not original:
+                continue
+            taxon_id, status, method = _map_name(
+                stage, str(name_id), original, correct_spelling_id or "", synonym_id or ""
+            )
+            if str(name_id) in manual:
+                taxon_id, status, method = int(manual[str(name_id)]), "mapped", "manual"
+            mapping_batch.append(
+                {
+                    "source": "mushroom_observer",
+                    "source_taxon_id": str(name_id),
+                    "original_name": original,
+                    "normalized_name": normalized_name(original),
+                    "taxon_id": taxon_id,
+                    "mapping_status": status,
+                    "mapping_method": method,
+                    "updated_at": started,
+                }
+            )
+            stage_batch.append((str(name_id), taxon_id, status, method, original, normalized_name(original)))
+            if taxon_id is not None:
+                alias_batch.append({"taxon_id": taxon_id, "name": original.strip(), "source": "Mushroom Observer"})
+        if mapping_batch:
             upsert_rows(session, SourceTaxon, mapping_batch, ["source", "source_taxon_id"], ["original_name", "normalized_name", "taxon_id", "mapping_status", "mapping_method", "updated_at"])
             session.commit()
             stage.executemany("INSERT OR REPLACE INTO mapped_names(mo_name_id,taxon_id,status,method,original_name,normalized_name) VALUES (?,?,?,?,?,?)", stage_batch)
@@ -233,6 +240,105 @@ def _write_mo_source_taxa(session: Session, stage: sqlite3.Connection, started: 
         ).all()
         stage.executemany("UPDATE mapped_names SET source_taxon_row_id=? WHERE mo_name_id=?", [(row_id, ext_id) for ext_id, row_id in rows])
     stage.commit()
+
+
+def recompute_mo_image_taxa(
+    session: Session,
+    *,
+    source_taxon_id: int | None = None,
+    current_since: datetime | None = None,
+    commit_batches: bool = False,
+    batch_size: int = 500,
+) -> set[int]:
+    """Re-evaluate images from every persisted MO-name association."""
+    # Callers may have just changed a manual SourceTaxon mapping in an
+    # autoflush-disabled session; make that mapping visible to the ORM queries.
+    session.flush()
+    state = session.scalar(select(SyncState).where(SyncState.source == "mushroom_observer"))
+    if current_since is None and state and state.status == "success":
+        current_since = state.last_started_at
+
+    last_id = 0
+    changed_taxa: set[int] = set()
+    while True:
+        image_query = select(Image.id).where(
+            Image.source == "mushroom_observer", Image.id > last_id
+        )
+        if source_taxon_id is not None:
+            image_query = image_query.join(
+                ImageSourceTaxon, ImageSourceTaxon.image_id == Image.id
+            ).where(ImageSourceTaxon.source_taxon_id == source_taxon_id).distinct()
+        if current_since is not None:
+            image_query = image_query.where(Image.source_last_seen_at >= current_since)
+        image_ids = list(
+            session.scalars(image_query.order_by(Image.id).limit(batch_size)).all()
+        )
+        if not image_ids:
+            break
+
+        associations: dict[int, list[int | None]] = defaultdict(list)
+        for image_id, taxon_id in session.execute(
+            select(ImageSourceTaxon.image_id, SourceTaxon.taxon_id)
+            .join(SourceTaxon, SourceTaxon.id == ImageSourceTaxon.source_taxon_id)
+            .where(ImageSourceTaxon.image_id.in_(image_ids))
+        ):
+            associations[image_id].append(taxon_id)
+
+        image_rows = session.execute(
+            select(Image.id, Image.taxon_id, Image.display_eligible, Image.active, Image.source_last_seen_at)
+            .where(Image.id.in_(image_ids))
+        ).all()
+        taxon_updates: dict[int, int | None] = {}
+        active_updates: dict[int, bool] = {}
+        for image_id, previous_taxon_id, eligible, was_active, last_seen_at in image_rows:
+            mapped_taxa = associations.get(image_id, [])
+            unique_mapped_taxa = {taxon_id for taxon_id in mapped_taxa if taxon_id is not None}
+            all_names_mapped = bool(mapped_taxa) and all(
+                taxon_id is not None for taxon_id in mapped_taxa
+            )
+            mapped_taxon_id = (
+                next(iter(unique_mapped_taxa))
+                if all_names_mapped and len(unique_mapped_taxa) == 1
+                else None
+            )
+
+            if current_since is not None:
+                compared_last_seen = last_seen_at
+                compared_since = current_since
+                if compared_last_seen and compared_last_seen.tzinfo is None:
+                    compared_last_seen = compared_last_seen.replace(tzinfo=timezone.utc)
+                if compared_since.tzinfo is None:
+                    compared_since = compared_since.replace(tzinfo=timezone.utc)
+                source_is_current = bool(compared_last_seen and compared_last_seen >= compared_since)
+            elif state is not None and state.status != "success":
+                # A failed/running reconciliation cannot establish upstream presence.
+                source_is_current = bool(was_active)
+            else:
+                source_is_current = True
+            is_active = bool(source_is_current and eligible and mapped_taxon_id is not None)
+            taxon_updates[image_id] = mapped_taxon_id
+            active_updates[image_id] = is_active
+            # Include every taxon touched by the current source records, even
+            # when the row was first upserted with this same mapping. Counts
+            # for newly inserted images still need refreshing.
+            if previous_taxon_id is not None:
+                changed_taxa.add(previous_taxon_id)
+            if mapped_taxon_id is not None:
+                changed_taxa.add(mapped_taxon_id)
+
+        session.execute(
+            update(Image)
+            .where(Image.id.in_(image_ids))
+            .values(
+                taxon_id=case(taxon_updates, value=Image.id, else_=None),
+                active=case(active_updates, value=Image.id, else_=False),
+                updated_at=utcnow(),
+            )
+        )
+        if commit_batches:
+            session.commit()
+        last_id = image_ids[-1]
+    return changed_taxa
 
 
 def import_exports(
@@ -277,10 +383,55 @@ def import_exports(
             image_fields = None
             associated = []
             image_count = 0
+            pending_images: list[dict] = []
+            pending_links: list[tuple[str, int]] = []
+
+            def persist_image_batch():
+                if not pending_images:
+                    return
+                upsert_rows(
+                    session,
+                    Image,
+                    pending_images,
+                    ["source", "source_image_id"],
+                    ["taxon_id", "source_taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+                )
+                external_ids = list(dict.fromkeys(row["source_image_id"] for row in pending_images))
+                image_ids = dict(
+                    session.execute(
+                        select(Image.source_image_id, Image.id).where(
+                            Image.source == "mushroom_observer",
+                            Image.source_image_id.in_(external_ids),
+                        )
+                    ).all()
+                )
+                link_rows = {
+                    (image_ids[external_id], source_id): {
+                        "image_id": image_ids[external_id],
+                        "source_taxon_id": source_id,
+                        "last_seen_at": started,
+                    }
+                    for external_id, source_id in pending_links
+                    if external_id in image_ids
+                }
+                upsert_rows(
+                    session,
+                    ImageSourceTaxon,
+                    list(link_rows.values()),
+                    ["image_id", "source_taxon_id"],
+                    ["last_seen_at"],
+                )
+                session.commit()
+                pending_images.clear()
+                pending_links.clear()
+                if image_count and image_count % 500 == 0:
+                    logger.info("imported %d Mushroom Observer image records", image_count)
 
             def flush_image():
                 nonlocal image_count, associated, current_image, image_fields
-                if current_image is None or not image_fields or not associated:
+                name_associations = associated
+                associated = []
+                if current_image is None or not image_fields or not name_associations:
                     return
                 image_id, content_type, holder, license_name, ok_export, observation_id = image_fields
                 if not parse_bool(ok_export):
@@ -288,10 +439,9 @@ def import_exports(
                 extension = EXTENSIONS.get((content_type or "").casefold())
                 if not extension:
                     return
-                mapped_ids = {int(row[0]) for row in associated if row[0] is not None}
-                all_names_mapped = all(row[0] is not None and row[1] is not None for row in associated)
+                mapped_ids = {int(row[0]) for row in name_associations if row[0] is not None}
+                all_names_mapped = all(row[0] is not None and row[1] is not None for row in name_associations)
                 taxon_id = next(iter(mapped_ids)) if all_names_mapped and len(mapped_ids) == 1 else None
-                source_taxon_id = associated[0][1]
                 display_ok = mo_license_allowed(license_name or "")
                 active = bool(display_ok and taxon_id is not None)
                 photographer = (holder or "").strip() or None
@@ -301,7 +451,7 @@ def import_exports(
                     attribution = photographer or (license_name or "License not recorded").strip()
                 db_image = {
                     "taxon_id": taxon_id,
-                    "source_taxon_id": source_taxon_id,
+                    "source_taxon_id": None,
                     "source": "mushroom_observer",
                     "source_image_id": str(image_id),
                     "source_observation_id": str(observation_id),
@@ -316,18 +466,15 @@ def import_exports(
                     "source_last_seen_at": started,
                     "updated_at": started,
                 }
-                upsert_rows(
-                    session,
-                    Image,
-                    [db_image],
-                    ["source", "source_image_id"],
-                    ["taxon_id", "source_taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+                pending_images.append(db_image)
+                pending_links.extend(
+                    (str(image_id), int(row[1]))
+                    for row in name_associations
+                    if row[1] is not None
                 )
                 image_count += 1
-                if image_count % 500 == 0:
-                    session.commit()
-                    logger.info("imported %d Mushroom Observer image records", image_count)
-                associated = []
+                if len(pending_images) >= 500:
+                    persist_image_batch()
 
             for row in query:
                 image_id = str(row[0])
@@ -340,8 +487,22 @@ def import_exports(
                 if association not in associated:
                     associated.append(association)
             flush_image()
-            session.commit()
+            persist_image_batch()
+            changed_taxa: set[int] = set()
             if full_reconciliation:
+                changed_taxa.update(
+                    taxon_id
+                    for taxon_id in session.scalars(
+                        select(Image.taxon_id)
+                        .where(
+                            Image.source == "mushroom_observer",
+                            Image.taxon_id.is_not(None),
+                            or_(Image.source_last_seen_at.is_(None), Image.source_last_seen_at < started),
+                        )
+                        .distinct()
+                    ).all()
+                    if taxon_id is not None
+                )
                 session.execute(
                     update(Image)
                     .where(
@@ -350,7 +511,20 @@ def import_exports(
                     )
                     .values(active=False)
                 )
-            refresh_image_counts(session)
+                session.execute(
+                    delete(ImageSourceTaxon).where(
+                        or_(ImageSourceTaxon.last_seen_at.is_(None), ImageSourceTaxon.last_seen_at < started)
+                    )
+                )
+            changed_taxa.update(
+                recompute_mo_image_taxa(
+                    session,
+                    current_since=started,
+                    commit_batches=True,
+                )
+            )
+            refresh_image_counts(session, changed_taxa)
+            session.commit()
             processed = image_count
             stage.close()
         finish_sync(session, "mushroom_observer", started, processed, cursor=started.isoformat())

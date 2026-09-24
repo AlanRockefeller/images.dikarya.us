@@ -199,15 +199,26 @@ def parse_license(value: str) -> str:
     return " ".join(value.strip().split())
 
 
-def refresh_image_counts(session: Session) -> None:
-    active_count = (
-        select(func.count(Image.id))
-        .where(
-            Image.taxon_id == Taxon.id,
-            Image.active.is_(True),
-            Image.display_eligible.is_(True),
-        )
-        .correlate(Taxon)
+def refresh_image_counts(session: Session, taxon_ids: Iterable[int] | None = None) -> None:
+    selected_ids = sorted(set(taxon_ids)) if taxon_ids is not None else None
+    if selected_ids == []:
+        return
+    counts_stmt = select(
+        Image.taxon_id.label("taxon_id"), func.count(Image.id).label("image_count")
+    ).where(
+        Image.taxon_id.is_not(None),
+        Image.active.is_(True),
+        Image.display_eligible.is_(True),
+    )
+    if selected_ids is not None:
+        counts_stmt = counts_stmt.where(Image.taxon_id.in_(selected_ids))
+    counts = counts_stmt.group_by(Image.taxon_id).subquery()
+    count_for_taxon = (
+        select(counts.c.image_count)
+        .where(counts.c.taxon_id == Taxon.id)
         .scalar_subquery()
     )
-    session.execute(update(Taxon).values(image_count=active_count))
+    statement = update(Taxon).values(image_count=func.coalesce(count_for_taxon, 0))
+    if selected_ids is not None:
+        statement = statement.where(Taxon.id.in_(selected_ids))
+    session.execute(statement)
