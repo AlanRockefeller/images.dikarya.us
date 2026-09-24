@@ -4,11 +4,12 @@ A server-rendered FastAPI site for browsing licensed taxon photographs and letti
 
 ## Architecture
 
-- FastAPI, Jinja2, HTMX, and plain CSS; the browser loads source-hosted images directly.
+- FastAPI, Jinja2, locally vendored HTMX 2.0.4, and plain CSS; the browser loads source-hosted images directly. The pinned HTMX license is in `third_party/`.
 - PostgreSQL through SQLAlchemy 2.x, with Alembic migrations.
 - Argon2id password hashing and signed, HttpOnly session cookies with per-session CSRF tokens.
 - [iNaturalist Open Data](https://github.com/inaturalist/inaturalist-open-data) monthly metadata for bulk taxonomy/photo imports, the rate-limited iNaturalist API for bounded daily updates, and [Mushroom Observer's official nightly CSV exports](https://github.com/MushroomObserver/mushroom-observer/blob/main/README_API.md#csv-files) for its bulk import.
 - No image files are stored here. Each displayed image includes source, creator, license, and a source record link.
+- A restrictive same-origin Content Security Policy keeps executable code local; external hosts are permitted only as image sources.
 
 ## Local development
 
@@ -61,7 +62,7 @@ The DwC-A supplies the accepted fungal taxonomy (including taxa without images);
 
 ### Daily incremental synchronization
 
-`python -m images_app.importers.inaturalist_incremental` asks the iNaturalist API only for observations updated since the persisted cursor (page size 200, custom User-Agent, at least one second between requests, bounded with an ID cursor). The API is not used for bulk backfill. `python -m images_app.importers.mushroom_observer --observations https://mushroomobserver.org/observations.csv --images-observations https://mushroomobserver.org/images_observations.csv --images https://mushroomobserver.org/images.csv --names https://mushroomobserver.org/names.csv` streams the official nightly CSV exports. MO records are first mapped by an exact accepted scientific name or unique alias. Ambiguous/unmatched names remain in `source_taxa` for review; no fuzzy guess is published. A manual mapping is available in the admin UI.
+`python -m images_app.importers.inaturalist_incremental` asks the iNaturalist API only for observations updated since the persisted cursor (page size 200, custom User-Agent, at least one second between requests, bounded with an ID cursor). If a long scan hits its request cap, it resumes by ID, then replays the entire same update window from ID zero before advancing the cursor. That replay catches lower-ID records edited while the backlog was being processed. The API is not used for bulk backfill. `python -m images_app.importers.mushroom_observer --observations https://mushroomobserver.org/observations.csv --images-observations https://mushroomobserver.org/images_observations.csv --images https://mushroomobserver.org/images.csv --names https://mushroomobserver.org/names.csv` streams the official nightly exports. Despite their `.csv` names, the live export files are tab-delimited; the four endpoint headers and sample rows were checked on 2026-09-24. The importer bounds SQLite name-ID lookups and persists every image-to-name association. MO names are matched by exact accepted scientific name, MO synonym links, or a unique known alias. If an image has conflicting names, it remains unpublished until every associated name maps to the same iNaturalist taxon. Ambiguous/unmatched names remain in `source_taxa` for review; no fuzzy guess is published. Manual mappings recompute affected images and image counts.
 
 ### Full reconciliation
 
@@ -71,7 +72,7 @@ All import commands create/update `sync_state` records and return nonzero on fai
 
 ## Production deployment
 
-The production service runs as Unix user `images`, binds only to `127.0.0.1:8017`, and has read/execute access to code. Keep the source owned by `alan`; do not grant the service account write access. The unit uses `/var/www/images.dikarya.us/.env` as a systemd `EnvironmentFile`, so systemd reads it without exposing it to the app process as a file. The app reads `APP_ENV`, `BASE_URL`, `DATABASE_URL`, and `SESSION_SECRET` from the environment. The PostgreSQL role and database already exist; Unix-socket peer auth matches `User=images`.
+The production service runs as Unix user `images`, binds only to `127.0.0.1:8017`, and has read/execute access to code. Keep the source owned by `alan`; do not grant the service account write access. The unit uses `/var/www/images.dikarya.us/.env` as a systemd `EnvironmentFile`, so systemd reads it without exposing it to the app process as a file. The app reads `APP_ENV`, `BASE_URL`, `DATABASE_URL`, and `SESSION_SECRET` from the environment. The PostgreSQL role and database already exist; Unix-socket peer auth matches `User=images`. Uvicorn trusts forwarded headers only from `127.0.0.1`; nginx must overwrite `X-Forwarded-For` with `$remote_addr` so login and registration throttles use the connecting client address.
 
 Example service, timer, and nginx files are in `deploy/`. Before installing them, inspect the host's active vhosts and units. Back up any file being changed, run `nginx -t`, then reload nginx. The singular hostname redirects with `$request_uri` to the plural canonical HTTPS host. The nginx example expects a certificate covering both `images.dikarya.us` and `image.dikarya.us`; issue/expand it with the host's existing Certbot setup after DNS points at the server. Do not reload until certificate paths exist and `nginx -t` succeeds.
 
@@ -121,7 +122,11 @@ nginx -t
 systemctl reload nginx
 ```
 
-The service logs to journald (`journalctl -u images -f`); importer status/errors are also recorded in `sync_state`. Timer logs can be inspected with `journalctl -u images-import-daily.service`, `journalctl -u images-import-reconcile.service`, and `systemctl list-timers`.
+The service logs to journald (`journalctl -u images -f`); importer status/errors are also recorded in `sync_state`. `/healthz` performs a database query and returns 503 when PostgreSQL cannot be reached. Timer logs can be inspected with `journalctl -u images-import-daily.service`, `journalctl -u images-import-reconcile.service`, and `systemctl list-timers`.
+
+## Browsing and rankings
+
+`/taxa` defaults to fungal species with images. The rank selector can show any other rank or all ranks. Galleries are paginated at 72 image references per page, with source, attribution, license, and external record links. Signed-in users can select or remove images immediately, reorder with the arrow controls, or drag selected cards by their handle; server-side validation persists contiguous ranks. Aggregates are queried from the individual rankings rather than stored as a fixed score.
 
 ## Backups
 
