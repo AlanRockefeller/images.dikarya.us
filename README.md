@@ -75,6 +75,8 @@ The production service runs as Unix user `images`, binds only to `127.0.0.1:8017
 
 Example service, timer, and nginx files are in `deploy/`. Before installing them, inspect the host's active vhosts and units. Back up any file being changed, run `nginx -t`, then reload nginx. The singular hostname redirects with `$request_uri` to the plural canonical HTTPS host. The nginx example expects a certificate covering both `images.dikarya.us` and `image.dikarya.us`; issue/expand it with the host's existing Certbot setup after DNS points at the server. Do not reload until certificate paths exist and `nginx -t` succeeds.
 
+For a new certificate, first install `deploy/images-acme-bootstrap.nginx.conf` as a new vhost, enable it, run `nginx -t`, and reload. It serves only ACME challenge files and returns 503 for other HTTP requests while the certificate is being issued. Then run `certbot certonly --webroot -w /var/www/letsencrypt -d images.dikarya.us -d image.dikarya.us`. After Certbot succeeds, back up the bootstrap vhost file, replace it with `deploy/images.nginx.conf`, run `nginx -t`, and reload. The final vhost redirects both HTTP names to HTTPS and redirects the singular HTTPS hostname to the canonical plural hostname while preserving path and query string.
+
 Example install flow (run as an administrator after reviewing the sample files). The recursive ownership and mode commands are idempotent; let each finish before continuing. They leave `alan` as owner and give `images` read/execute access only.
 
 ```sh
