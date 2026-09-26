@@ -25,7 +25,7 @@ from images_app.importers.mushroom_observer import (
 import images_app.importers.common as importer_common
 from images_app.importers.common import delete_unverified_images_without_votes, stream_tsv
 from images_app.models import Image, ImageSourceTaxon, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote
-from images_app.importers.inaturalist_reconcile import synchronize_dna_images
+from images_app.importers.inaturalist_reconcile import _iter_observation_pages, synchronize_dna_images
 
 
 def write_tsv(path, headers, rows, gz=False):
@@ -236,6 +236,30 @@ def test_unverified_cleanup_keeps_any_image_with_a_vote(database, taxon):
         kept = db.get(Image, voted_id)
         assert kept is not None and not kept.active and not kept.dna_verified
         assert db.scalar(select(func.count(Vote.id)).where(Vote.image_id == voted_id)) == 1
+
+
+def test_inaturalist_reconcile_retries_connection_drop_and_429(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("images_app.importers.inaturalist_reconcile.time.sleep", sleeps.append)
+    calls = 0
+
+    def respond(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.RemoteProtocolError("connection closed")
+        if calls == 2:
+            return httpx.Response(429, headers={"Retry-After": "3"})
+        return httpx.Response(200, json={"results": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    try:
+        assert list(_iter_observation_pages(client, root_taxon_id=47170, request_interval=2)) == []
+    finally:
+        client.close()
+
+    assert calls == 3
+    assert sleeps == [2, 3]
 
 
 def test_full_reconciliation_imports_dwca_taxonomy_and_marks_missing_taxa_inactive(database, tmp_path):

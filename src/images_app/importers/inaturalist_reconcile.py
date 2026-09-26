@@ -35,7 +35,8 @@ from images_app.models import Image, Taxon
 logger = logging.getLogger("images_app.importers.inaturalist_reconcile")
 USER_AGENT = "DikaryaImages/0.1 (https://images.dikarya.us; DNA-verified metadata reconciliation)"
 PAGE_SIZE = 200
-MAX_API_REQUESTS = 9000
+MAX_API_REQUESTS = 4000
+MAX_REQUEST_ATTEMPTS = 6
 
 
 def _iter_observation_pages(
@@ -57,11 +58,23 @@ def _iter_observation_pages(
             "id_above": last_id,
         }
         response = None
-        for attempt in range(6):
+        for attempt in range(MAX_REQUEST_ATTEMPTS):
             if api_requests >= MAX_API_REQUESTS:
                 raise RuntimeError("iNaturalist DNA-filtered reconciliation reached its request limit")
             api_requests += 1
-            response = client.get(OBSERVATIONS_API_URL, params=params)
+            try:
+                response = client.get(OBSERVATIONS_API_URL, params=params)
+            except httpx.TransportError as exc:
+                if attempt == MAX_REQUEST_ATTEMPTS - 1:
+                    raise
+                delay = max(request_interval, min(60.0, 2.0**attempt))
+                logger.warning(
+                    "iNaturalist connection failed (%s); retrying in %.1fs",
+                    exc.__class__.__name__,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
             if response.status_code not in {429, 500, 502, 503, 504}:
                 break
             retry_after = response.headers.get("Retry-After")
@@ -115,7 +128,7 @@ def synchronize_dna_images(
     root_taxon_id: int = settings.fungi_taxon_id,
     stage_dir: str = "/var/lib/images-import",
     client: httpx.Client | None = None,
-    request_interval: float = 1.05,
+    request_interval: float = 2.0,
 ) -> int:
     """Reconcile fungal taxonomy and only images on observations with an ITS field."""
     started = begin_sync(session, "inaturalist")
