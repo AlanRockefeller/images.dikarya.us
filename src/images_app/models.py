@@ -119,6 +119,7 @@ class Image(Base):
         UniqueConstraint("source", "source_image_id", name="uq_images_source_image"),
         CheckConstraint("source IN ('inaturalist', 'mushroom_observer')", name="ck_images_source"),
         Index("ix_images_taxon_active", "taxon_id", "active", "id"),
+        Index("ix_images_source_observation", "source", "source_observation_id"),
     )
 
     id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
@@ -134,6 +135,7 @@ class Image(Base):
     license: Mapped[str | None] = mapped_column(String(100))
     attribution: Mapped[str | None] = mapped_column(Text)
     display_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dna_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     source_last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

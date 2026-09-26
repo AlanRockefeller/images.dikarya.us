@@ -59,7 +59,7 @@ def taxon(database):
 
 @pytest.fixture
 def add_image(database, taxon):
-    def _add(source_id: int, taxon_id: int | None = None, *, active: bool = True, license: str = "CC BY-SA"):
+    def _add(source_id: int, taxon_id: int | None = None, *, active: bool = True, license: str = "CC BY-SA", dna_verified: bool = True):
         with database() as db:
             image = Image(
                 taxon_id=taxon_id or taxon,
@@ -73,6 +73,7 @@ def add_image(database, taxon):
                 license=license,
                 attribution=f"© A. Photographer ({license})",
                 display_eligible=True,
+                dna_verified=dna_verified,
                 active=active,
             )
             db.add(image)

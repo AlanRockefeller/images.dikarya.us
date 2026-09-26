@@ -4,10 +4,12 @@ import argparse
 import logging
 import sqlite3
 import tempfile
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -34,6 +36,8 @@ logger = logging.getLogger("images_app.importers.mushroom_observer")
 # license text is explicit. Unknown labels are retained as metadata and hidden.
 MO_WIKIPEDIA_LICENSE = "creative commons wikipedia compatible v3.0"
 EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
+SEQUENCES_API_URL = "https://mushroomobserver.org/api2/sequences"
+MO_USER_AGENT = "DikaryaImages/0.1 (https://images.dikarya.us; DNA sequence metadata synchronization)"
 
 
 def mo_license_allowed(value: str) -> bool:
@@ -46,6 +50,81 @@ def mo_license_allowed(value: str) -> bool:
     return bool(explicit_by_sa and any(version in normalized for version in ("2.0", "2.5", "3.0", "4.0")))
 
 
+def fetch_mo_dna_observation_ids(
+    *, client: httpx.Client | None = None, request_interval: float = 5.0
+) -> set[str]:
+    """Fetch observation IDs associated with non-empty Mushroom Observer sequence records."""
+    owns_client = client is None
+    http = client or httpx.Client(
+        timeout=90,
+        headers={"User-Agent": MO_USER_AGENT, "Accept": "application/json"},
+    )
+    observation_ids: set[str] = set()
+    page = 1
+    total_pages: int | None = None
+    try:
+        while total_pages is None or page <= total_pages:
+            response = None
+            for attempt in range(6):
+                response = http.get(
+                    SEQUENCES_API_URL,
+                    params={"detail": "low", "format": "json", "page": page},
+                )
+                if response.status_code not in {429, 500, 502, 503, 504}:
+                    break
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = max(float(retry_after), request_interval) if retry_after else max(request_interval, min(120.0, 2.0**attempt))
+                except ValueError:
+                    delay = max(request_interval, min(120.0, 2.0**attempt))
+                logger.warning("Mushroom Observer API returned %d; retrying in %.1fs", response.status_code, delay)
+                time.sleep(delay)
+            if response is None:
+                raise RuntimeError("No response from the Mushroom Observer sequences API")
+            response.raise_for_status()
+            payload = response.json()
+            rows = payload.get("results")
+            if not isinstance(rows, list):
+                raise ValueError("Unexpected Mushroom Observer sequences API response")
+            if total_pages is None:
+                try:
+                    total_pages = int(payload["number_of_pages"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError("Mushroom Observer sequence response omitted its page count") from exc
+                if total_pages < 1:
+                    raise ValueError("Mushroom Observer sequence export was empty")
+            for sequence in rows:
+                if not isinstance(sequence, dict):
+                    continue
+                observation_id = str(sequence.get("observation_id") or "").strip()
+                has_sequence_data = bool(
+                    str(sequence.get("bases") or "").strip()
+                    or str(sequence.get("accession") or "").strip()
+                )
+                if observation_id and has_sequence_data:
+                    observation_ids.add(observation_id)
+            if page % 5 == 0 or page == total_pages:
+                logger.info(
+                    "read Mushroom Observer sequence page %d/%d; found %d observations with DNA sequence evidence",
+                    page,
+                    total_pages,
+                    len(observation_ids),
+                )
+            page += 1
+            if page <= total_pages:
+                try:
+                    run_time = float(payload.get("run_time") or 0)
+                except (TypeError, ValueError):
+                    run_time = 0
+                time.sleep(max(request_interval, run_time))
+        if not observation_ids:
+            raise ValueError("Mushroom Observer returned no observations with DNA sequence evidence")
+        return observation_ids
+    finally:
+        if owns_client:
+            http.close()
+
+
 def _sqlite_stage(path: Path) -> sqlite3.Connection:
     stage = sqlite3.connect(path)
     stage.execute("PRAGMA journal_mode=OFF")
@@ -54,6 +133,7 @@ def _sqlite_stage(path: Path) -> sqlite3.Connection:
         """
         CREATE TABLE mo_names(id TEXT PRIMARY KEY, text_name TEXT, deprecated TEXT, correct_spelling_id TEXT, synonym_id TEXT);
         CREATE TABLE mo_observations(id TEXT PRIMARY KEY, name_id TEXT);
+        CREATE TABLE mo_dna_observations(id TEXT PRIMARY KEY);
         CREATE TABLE image_observations(image_id TEXT, observation_id TEXT);
         CREATE INDEX ix_mo_links_image ON image_observations(image_id);
         CREATE INDEX ix_mo_links_observation ON image_observations(observation_id);
@@ -157,6 +237,7 @@ def _write_mo_source_taxa(session: Session, stage: sqlite3.Connection, started: 
     # Only names represented by a public observation image enter the review queue.
     used_ids = stage.execute(
         "SELECT DISTINCT o.name_id FROM mo_observations o "
+        "JOIN mo_dna_observations d ON d.id=o.id "
         "JOIN image_observations l ON l.observation_id=o.id "
         "JOIN mo_images i ON i.id=l.image_id "
         "WHERE o.name_id IS NOT NULL AND lower(trim(i.ok_for_export)) IN ('1','true','t','yes','y')"
@@ -285,12 +366,12 @@ def recompute_mo_image_taxa(
             associations[image_id].append(taxon_id)
 
         image_rows = session.execute(
-            select(Image.id, Image.taxon_id, Image.display_eligible, Image.active, Image.source_last_seen_at)
+            select(Image.id, Image.taxon_id, Image.display_eligible, Image.dna_verified, Image.active, Image.source_last_seen_at)
             .where(Image.id.in_(image_ids))
         ).all()
         taxon_updates: dict[int, int | None] = {}
         active_updates: dict[int, bool] = {}
-        for image_id, previous_taxon_id, eligible, was_active, last_seen_at in image_rows:
+        for image_id, previous_taxon_id, eligible, dna_verified, was_active, last_seen_at in image_rows:
             mapped_taxa = associations.get(image_id, [])
             unique_mapped_taxa = {taxon_id for taxon_id in mapped_taxa if taxon_id is not None}
             all_names_mapped = bool(mapped_taxa) and all(
@@ -315,7 +396,7 @@ def recompute_mo_image_taxa(
                 source_is_current = bool(was_active)
             else:
                 source_is_current = True
-            is_active = bool(source_is_current and eligible and mapped_taxon_id is not None)
+            is_active = bool(source_is_current and eligible and dna_verified and mapped_taxon_id is not None)
             taxon_updates[image_id] = mapped_taxon_id
             active_updates[image_id] = is_active
             # Include every taxon touched by the current source records, even
@@ -348,6 +429,7 @@ def import_exports(
     image_observations_path: str,
     images_path: str,
     names_path: str,
+    dna_observation_ids: set[str],
     stage_dir: str = "/var/lib/images-import",
     full_reconciliation: bool = True,
     root_taxon_id: int = settings.fungi_taxon_id,
@@ -356,6 +438,11 @@ def import_exports(
     processed = 0
     stage_root = Path(stage_dir)
     try:
+        dna_observation_ids = {
+            str(value).strip() for value in dna_observation_ids if str(value).strip()
+        }
+        if not dna_observation_ids:
+            raise ValueError("The Mushroom Observer DNA-observation set was empty")
         stage_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="mo-", dir=stage_root) as temp_dir:
             stage = _sqlite_stage(Path(temp_dir) / "join.sqlite3")
@@ -363,6 +450,10 @@ def import_exports(
             _load_csv(stage, "observations", observations_path, ("id", "name_id"), "INSERT OR REPLACE INTO mo_observations VALUES (?,?)")
             _load_csv(stage, "image_observations", image_observations_path, ("image_id", "observation_id"), "INSERT INTO image_observations VALUES (?,?)")
             _load_csv(stage, "images", images_path, ("id", "content_type", "copyright_holder", "license", "ok_for_export"), "INSERT OR REPLACE INTO mo_images VALUES (?,?,?,?,?)")
+            stage.executemany(
+                "INSERT OR IGNORE INTO mo_dna_observations VALUES (?)",
+                [(value,) for value in dna_observation_ids],
+            )
             stage.execute("CREATE INDEX ix_mo_obs_name ON mo_observations(name_id)")
             stage.execute("CREATE INDEX ix_mo_names_id ON mo_names(id)")
             stage.commit()
@@ -375,6 +466,7 @@ def import_exports(
                 "FROM mo_images i "
                 "JOIN image_observations l ON l.image_id=i.id "
                 "JOIN mo_observations o ON o.id=l.observation_id "
+                "JOIN mo_dna_observations d ON d.id=o.id "
                 "JOIN mo_names n ON n.id=o.name_id "
                 "LEFT JOIN mapped_names m ON m.mo_name_id=n.id "
                 "ORDER BY i.id,o.id"
@@ -394,7 +486,7 @@ def import_exports(
                     Image,
                     pending_images,
                     ["source", "source_image_id"],
-                    ["taxon_id", "source_taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+                    ["taxon_id", "source_taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "dna_verified", "active", "source_last_seen_at", "updated_at"],
                 )
                 external_ids = list(dict.fromkeys(row["source_image_id"] for row in pending_images))
                 image_ids = dict(
@@ -462,6 +554,7 @@ def import_exports(
                     "license": (license_name or "License not recorded").strip()[:100],
                     "attribution": attribution,
                     "display_eligible": display_ok,
+                    "dna_verified": True,
                     "active": active,
                     "source_last_seen_at": started,
                     "updated_at": started,
@@ -546,12 +639,14 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with import_lock(Path(args.stage_dir) / "mushroom_observer.lock"), SessionLocal() as session:
+        dna_observation_ids = fetch_mo_dna_observation_ids()
         count = import_exports(
             session,
             observations_path=args.observations,
             image_observations_path=args.images_observations,
             images_path=args.images,
             names_path=args.names,
+            dna_observation_ids=dna_observation_ids,
             stage_dir=args.stage_dir,
             full_reconciliation=not args.no_full_reconciliation,
             root_taxon_id=args.root_taxon_id,

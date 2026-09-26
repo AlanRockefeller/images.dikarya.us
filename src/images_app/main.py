@@ -103,7 +103,7 @@ def render_gallery(db: Session, request: Request, taxon: Taxon, user: User | Non
 
 def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | None, page: int):
     page_size = 72
-    total = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True))) or 0
+    total = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))) or 0
     vote = aliased(Vote)
     my_vote = aliased(Vote)
     rank_one = func.coalesce(func.sum(case((vote.rank == 1, 1), else_=0)), 0)
@@ -114,7 +114,7 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
         select(Image, picked_by.label("picked_by"), rank_one.label("rank_one"), average_rank.label("average_rank"), my_rank)
         .outerjoin(vote, and_(vote.image_id == Image.id, vote.taxon_id == taxon.id))
         .outerjoin(my_vote, and_(my_vote.image_id == Image.id, my_vote.taxon_id == taxon.id, my_vote.user_id == (user.id if user else -1)))
-        .where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True))
+        .where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))
         .group_by(Image.id, my_vote.rank)
         .order_by(
             case((my_vote.rank.is_not(None), 0), else_=1),
@@ -245,7 +245,7 @@ def taxon_page(request: Request, taxon_id: int, slug: str = "", page: int = 1, d
     if taxon not in ancestors:
         ancestors.append(taxon)
     voted_users = db.scalar(select(func.count(func.distinct(Vote.user_id))).where(Vote.taxon_id == taxon.id)) or 0
-    total_images = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True))) or 0
+    total_images = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))) or 0
     page = max(1, page)
     data = gallery_context(db, request, taxon, session_user(request, db), page)
     data.update({"ancestors": ancestors, "voted_users": voted_users, "total_images": total_images})
@@ -357,7 +357,7 @@ def toggle_vote(
         votes = [v for v in votes if v.id != existing.id]
         _persist_vote_order(db, votes)
     else:
-        if not image.active or not image.display_eligible:
+        if not image.active or not image.display_eligible or not image.dna_verified:
             raise HTTPException(409, "This image is no longer available for ranking")
         db.add(Vote(user_id=user.id, taxon_id=taxon.id, image_id=image.id, rank=len(votes) + 1))
     db.commit()

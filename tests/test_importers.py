@@ -14,10 +14,12 @@ import pytest
 from sqlalchemy import func, select
 
 from images_app.importers.inaturalist import import_bulk, upsert_inaturalist_images
+from images_app.importers.inaturalist_dna import export_dna_observation_uuids
 from images_app.importers.inaturalist_incremental import incremental_sync
 from images_app.importers.mushroom_observer import (
     _sqlite_stage,
     _write_mo_source_taxa,
+    fetch_mo_dna_observation_ids,
     import_exports,
     recompute_mo_image_taxa,
 )
@@ -37,15 +39,17 @@ def write_tsv(path, headers, rows, gz=False):
 
 def test_inaturalist_bulk_import_is_idempotent(database, tmp_path):
     taxa = write_tsv(tmp_path / "taxa.csv.gz", ["taxon_id", "ancestry", "rank", "name", "active"], [[47170, "1", "kingdom", "Fungi", "true"], [555001, "1/47170", "species", "Amanita muscaria", "true"], [555002, "1/47170", "species", "Boletus edulis", "true"], [999999, "1/2", "species", "Animal", "true"]], True)
-    observations = write_tsv(tmp_path / "observations.csv.gz", ["observation_uuid", "observer_id", "taxon_id", "quality_grade"], [["obs-fungi", "15", "555001", "research"], ["obs-conflict", "15", "555002", "research"], ["obs-animal", "16", "999999", "research"]], True)
+    observations = write_tsv(tmp_path / "observations.csv.gz", ["observation_uuid", "observer_id", "taxon_id", "quality_grade"], [["obs-fungi", "15", "555001", "research"], ["obs-conflict", "15", "555002", "research"], ["obs-no-dna", "15", "555001", "research"], ["obs-animal", "16", "999999", "research"]], True)
     observers = write_tsv(tmp_path / "observers.csv.gz", ["observer_id", "login", "name"], [["15", "mushroomfan", "Mushroom Fan"]], True)
-    photos = write_tsv(tmp_path / "photos.csv.gz", ["photo_uuid", "photo_id", "observation_uuid", "observer_id", "extension", "license"], [["photo-1", "987654", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-pdm", "987655", "obs-fungi", "15", "jpeg", "cc-pdm"], ["photo-shared-a", "987656", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-shared-b", "987656", "obs-conflict", "15", "jpeg", "cc-by"], ["photo-2", "999999", "obs-animal", "16", "jpeg", "cc-by"]], True)
+    photos = write_tsv(tmp_path / "photos.csv.gz", ["photo_uuid", "photo_id", "observation_uuid", "observer_id", "extension", "license"], [["photo-1", "987654", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-pdm", "987655", "obs-fungi", "15", "jpeg", "cc-pdm"], ["photo-shared-a", "987656", "obs-fungi", "15", "jpeg", "cc-by"], ["photo-shared-b", "987656", "obs-conflict", "15", "jpeg", "cc-by"], ["photo-no-dna", "987657", "obs-no-dna", "15", "jpeg", "cc-by"], ["photo-2", "999999", "obs-animal", "16", "jpeg", "cc-by"]], True)
+    dna_observations = write_tsv(tmp_path / "dna-observations.tsv", ["observation_uuid"], [["obs-fungi"], ["obs-conflict"]])
     for _ in range(2):
         with database() as db:
-            import_bulk(db, taxa, observations, observers, photos, stage_dir=str(tmp_path / "stage"))
+            import_bulk(db, taxa, observations, observers, photos, dna_observations_path=dna_observations, stage_dir=str(tmp_path / "stage"))
     with database() as db:
         assert db.scalar(select(func.count(Taxon.id))) == 3
         assert db.scalar(select(func.count(Image.id))) == 3
+        assert db.scalar(select(Image.id).where(Image.source_image_id == "987657")) is None
         image = db.scalar(select(Image).where(Image.source_image_id == "987654"))
         assert image.source_image_id == "987654"
         assert image.license == "CC BY"
@@ -86,6 +90,30 @@ def test_inaturalist_bulk_import_is_idempotent(database, tmp_path):
         assert state.status == "success"
 
 
+def test_inaturalist_dna_export_filters_nonempty_exact_its_field(tmp_path):
+    def respond(request):
+        assert request.url.params.get("field:DNA Barcode ITS") == ""
+        assert request.url.params.get("id_above") == "0"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 10, "uuid": "with-its", "ofvs": [{"field_id": 2330, "value": "ACGT"}]},
+                    {"id": 11, "uuid": "blank-its", "ofvs": [{"field_id": 2330, "value": "  "}]},
+                    {"id": 12, "uuid": "other-field", "ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT"}]},
+                    {"id": 13, "uuid": "named-its", "ofvs": [{"name": "DNA Barcode ITS", "value": "ACGT"}]},
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    path = tmp_path / "dna-observations.tsv"
+    count = export_dna_observation_uuids(path, client=client, request_interval=0)
+    client.close()
+    assert count == 2
+    assert path.read_text(encoding="utf-8").splitlines() == ["observation_uuid", "with-its", "named-its"]
+
+
 def test_full_reconciliation_imports_dwca_taxonomy_and_marks_missing_taxa_inactive(database, tmp_path):
     with database() as db:
         db.add(Taxon(inat_taxon_id=999999, scientific_name="Old inactive name", rank="species", ancestry="/1/47170/999999/", active=True, last_synced_at=datetime(2020, 1, 1, tzinfo=timezone.utc)))
@@ -104,19 +132,37 @@ def test_full_reconciliation_imports_dwca_taxonomy_and_marks_missing_taxa_inacti
         writer.writerows(rows)
         archive.writestr("taxa.csv", data.getvalue())
     taxa = write_tsv(tmp_path / "taxa.tsv", ["taxon_id", "ancestry", "rank", "name", "active"], [[47170, "1", "kingdom", "Fungi", "true"], [555001, "1/47170/444", "species", "Amanita muscaria", "true"]])
-    observations = write_tsv(tmp_path / "observations.tsv", ["observation_uuid", "observer_id", "taxon_id"], [["obs-a", "15", "555001"]])
+    observations = write_tsv(tmp_path / "observations.tsv", ["observation_uuid", "observer_id", "taxon_id"], [["obs-a", "15", "555001"], ["obs-no-dna", "15", "555001"]])
     observers = write_tsv(tmp_path / "observers.tsv", ["observer_id", "login", "name"], [["15", "fungi_user", "Fungi User"]])
     photos = write_tsv(tmp_path / "photos.tsv", ["photo_id", "observation_uuid", "observer_id", "extension", "license"], [["99001", "obs-a", "15", "jpeg", "cc-by-sa"]])
-    kwargs = dict(taxa_path=taxa, observations_path=observations, observers_path=observers, photos_path=photos, stage_dir=str(tmp_path / "stage"), taxonomy_archive=str(dwca), full_reconciliation=True)
-    for _ in range(2):
+    dna_observations = write_tsv(tmp_path / "dwca-dna-observations.tsv", ["observation_uuid"], [["obs-a"]])
+    kwargs = dict(taxa_path=taxa, observations_path=observations, observers_path=observers, photos_path=photos, dna_observations_path=dna_observations, stage_dir=str(tmp_path / "stage"), taxonomy_archive=str(dwca), full_reconciliation=True)
+    for run in range(2):
         with database() as db:
             import_bulk(db, **kwargs)
+            if run == 0:
+                db.add(
+                    Image(
+                        source="inaturalist",
+                        source_image_id="old-image-with-removed-ITS-field",
+                        source_observation_id="obs-no-dna",
+                        medium_url="https://inaturalist-open-data.s3.amazonaws.com/photos/old/medium.jpg",
+                        source_page_url="https://www.inaturalist.org/observations/obs-no-dna",
+                        display_eligible=True,
+                        dna_verified=True,
+                        active=True,
+                        taxon_id=db.scalar(select(Taxon.id).where(Taxon.inat_taxon_id == 555001)),
+                    )
+                )
+                db.commit()
     with database() as db:
         taxa_by_external = {taxon.inat_taxon_id: taxon for taxon in db.scalars(select(Taxon)).all()}
         assert set(taxa_by_external) == {444, 47170, 555001, 999999}
         assert taxa_by_external[555001].parent_id == taxa_by_external[444].id
         assert not taxa_by_external[999999].active
-        assert db.scalar(select(func.count(Image.id))) == 1
+        assert db.scalar(select(func.count(Image.id))) == 2
+        old_image = db.scalar(select(Image).where(Image.source_image_id == "old-image-with-removed-ITS-field"))
+        assert not old_image.active and not old_image.dna_verified
 
 
 def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database, taxon):
@@ -126,8 +172,10 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
             "results": [
                 {
                     "id": 700001,
+                    "uuid": "obs-uuid-700001",
                     "taxon": {"id": 555001, "name": "Amanita muscaria", "rank": "species", "ancestry": "1/47170"},
                     "user": {"login": "fungi_user", "name": "Fungi User"},
+                    "ofvs": [{"field_id": 2330, "name": "DNA Barcode ITS", "value": "ACGT"}],
                     "photos": [
                         {
                             "id": 880001,
@@ -151,10 +199,55 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
         imported_taxon = db.get(Taxon, taxon)
         assert count == 1
         assert image.taxon_id == taxon
+        assert image.dna_verified
+        assert image.source_observation_id == "obs-uuid-700001"
         assert image.medium_url.endswith("/medium.jpeg")
         assert state.status == "success"
         assert '"since"' in state.cursor
         assert imported_taxon.image_count == 1
+
+
+def test_incremental_inaturalist_hides_existing_image_when_its_field_is_removed(database, taxon):
+    with database() as db:
+        db.add(
+            Image(
+                source="inaturalist",
+                source_image_id="880002",
+                source_observation_id="obs-uuid-700002",
+                medium_url="https://inaturalist-open-data.s3.amazonaws.com/photos/880002/medium.jpeg",
+                source_page_url="https://www.inaturalist.org/observations/700002",
+                display_eligible=True,
+                dna_verified=True,
+                active=True,
+                taxon_id=taxon,
+            )
+        )
+        db.commit()
+
+    def respond(request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 700002,
+                        "uuid": "obs-uuid-700002",
+                        "taxon": {"id": 555001, "name": "Amanita muscaria", "rank": "species", "ancestry": "1/47170"},
+                        "photos": [],
+                        "ofvs": [],
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    with database() as db:
+        incremental_sync(db, client=client)
+    client.close()
+    with database() as db:
+        image = db.scalar(select(Image).where(Image.source_image_id == "880002"))
+        assert not image.active
+        assert image.dna_verified
 
 
 def test_incremental_inaturalist_replays_window_after_capped_backlog(database, taxon):
@@ -223,7 +316,7 @@ def test_mushroom_observer_import_idempotency_and_unresolved_name(database, tmp_
         ["id", "content_type", "copyright_holder", "license", "ok_for_export"],
         [["900", "image/jpeg", "Photo Person", "Creative Commons Wikipedia Compatible v3.0", "1"], ["901", "image/jpeg", "Unknown Person", "All rights reserved", "1"], ["902", "image/jpeg", "Shared Photographer", "Creative Commons Wikipedia Compatible v3.0", "1"]],
     )
-    kwargs = dict(observations_path=observations, image_observations_path=image_observations, images_path=images, names_path=names, stage_dir=str(tmp_path / "stage"))
+    kwargs = dict(observations_path=observations, image_observations_path=image_observations, images_path=images, names_path=names, dna_observation_ids={"800", "801"}, stage_dir=str(tmp_path / "stage"))
     for _ in range(2):
         with database() as db:
             import_exports(db, **kwargs)
@@ -260,6 +353,7 @@ def test_mushroom_observer_name_lookups_are_batched_below_sqlite_variable_limit(
     links = [("shared-image", f"obs-{index}") for index in range(1200)]
     stage.executemany("INSERT INTO mo_names VALUES (?,?,?,?,?)", names)
     stage.executemany("INSERT INTO mo_observations VALUES (?,?)", observations)
+    stage.executemany("INSERT INTO mo_dna_observations VALUES (?)", [(f"obs-{index}",) for index in range(1200)])
     stage.executemany("INSERT INTO image_observations VALUES (?,?)", links)
     stage.execute("INSERT INTO mo_images VALUES (?,?,?,?,?)", ("shared-image", "image/jpeg", "", "", "1"))
     stage.commit()
@@ -286,11 +380,58 @@ def test_mushroom_observer_uses_known_taxon_alias(database, tmp_path):
     links = write_tsv(tmp_path / "links.csv", ["image_id", "observation_id"], [["902", "802"]])
     images = write_tsv(tmp_path / "images.csv", ["id", "content_type", "copyright_holder", "license", "ok_for_export"], [["902", "image/jpeg", "Photo Person", "Creative Commons Wikipedia Compatible v3.0", "1"]])
     with database() as db:
-        import_exports(db, observations_path=observations, image_observations_path=links, images_path=images, names_path=names, stage_dir=str(tmp_path / "stage"))
+        import_exports(db, observations_path=observations, image_observations_path=links, images_path=images, names_path=names, dna_observation_ids={"802"}, stage_dir=str(tmp_path / "stage"))
     with database() as db:
         source_taxon = db.scalar(select(SourceTaxon).where(SourceTaxon.source_taxon_id == "102"))
         assert source_taxon.mapping_method == "known_taxon_alias"
         assert source_taxon.taxon_id == accepted_id
+
+
+def test_mushroom_observer_sequence_api_finds_observations_with_sequence_data():
+    def respond(request):
+        assert request.url.params["detail"] == "low"
+        assert request.url.params["format"] == "json"
+        assert request.url.params["page"] == "1"
+        return httpx.Response(
+            200,
+            json={
+                "number_of_pages": 1,
+                "results": [
+                    {"observation_id": 801, "bases": "ACGT", "accession": "AB123"},
+                    {"observation_id": 802, "bases": "", "accession": ""},
+                    {"observation_id": None, "bases": "ACGT", "accession": None},
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    assert fetch_mo_dna_observation_ids(client=client, request_interval=0) == {"801"}
+    client.close()
+
+
+def test_mushroom_observer_filters_images_by_qualifying_observation(database, tmp_path):
+    with database() as db:
+        root = Taxon(inat_taxon_id=47170, scientific_name="Fungi", rank="kingdom", ancestry="/1/47170/", active=True)
+        db.add(root)
+        db.flush()
+        accepted = Taxon(inat_taxon_id=555001, parent_id=root.id, scientific_name="Amanita muscaria", rank="species", ancestry="/1/47170/555001/", active=True)
+        db.add(accepted)
+        db.commit()
+        accepted_id = accepted.id
+    names = write_tsv(tmp_path / "dna-names.csv", ["id", "text_name", "author", "deprecated", "correct_spelling_id", "synonym_id", "rank"], [["100", "Amanita muscaria", "", "0", "", "", "400"], ["101", "Mystery fungus", "", "0", "", "", "400"]])
+    observations = write_tsv(tmp_path / "dna-observations.csv", ["id", "name_id"], [["800", "100"], ["801", "101"]])
+    links = write_tsv(tmp_path / "dna-links.csv", ["image_id", "observation_id"], [["900", "800"], ["901", "801"], ["902", "800"], ["902", "801"]])
+    images = write_tsv(tmp_path / "dna-images.csv", ["id", "content_type", "copyright_holder", "license", "ok_for_export"], [[str(image_id), "image/jpeg", "Photo Person", "Creative Commons Wikipedia Compatible v3.0", "1"] for image_id in (900, 901, 902)])
+    with database() as db:
+        import_exports(db, observations_path=observations, image_observations_path=links, images_path=images, names_path=names, dna_observation_ids={"800"}, stage_dir=str(tmp_path / "stage"))
+    with database() as db:
+        assert db.scalar(select(func.count(Image.id)).where(Image.source == "mushroom_observer")) == 2
+        excluded = db.scalar(select(Image).where(Image.source == "mushroom_observer", Image.source_image_id == "901"))
+        assert excluded is None
+        shared = db.scalar(select(Image).where(Image.source == "mushroom_observer", Image.source_image_id == "902"))
+        assert shared.dna_verified and shared.active
+        assert shared.taxon_id == accepted_id
+        assert db.scalar(select(func.count(ImageSourceTaxon.image_id)).where(ImageSourceTaxon.image_id == shared.id)) == 1
 
 
 def test_vote_history_remains_when_source_moves_image_to_another_taxon(database, taxon):

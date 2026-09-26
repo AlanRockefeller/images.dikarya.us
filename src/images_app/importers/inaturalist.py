@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import tempfile
+import time
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from io import TextIOWrapper
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.orm import Session
 
@@ -39,6 +41,30 @@ DISPLAY_LICENSE_LABELS = {
     "cc-by-sa": "CC BY-SA",
 }
 DATASET_HOST = "inaturalist-open-data.s3.amazonaws.com"
+OBSERVATIONS_API_URL = "https://api.inaturalist.org/v1/observations"
+DNA_BARCODE_ITS_FIELD_ID = 2330
+DNA_BARCODE_ITS_FIELD_NAME = "dna barcode its"
+
+
+def has_dna_barcode_its(observation: dict) -> bool:
+    """Whether the observation has a non-empty value in iNat's ITS barcode field."""
+    fields = observation.get("ofvs") or []
+    if not isinstance(fields, list):
+        return False
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_id = field.get("field_id")
+        if field_id is None:
+            matching_field = str(field.get("name") or "").strip().casefold() == DNA_BARCODE_ITS_FIELD_NAME
+        else:
+            try:
+                matching_field = int(field_id) == DNA_BARCODE_ITS_FIELD_ID
+            except (TypeError, ValueError):
+                matching_field = False
+        if matching_field and str(field.get("value") or "").strip():
+            return True
+    return False
 
 
 def normalize_ancestry(value: str, own_id: int) -> tuple[list[int], str]:
@@ -170,7 +196,7 @@ def upsert_inaturalist_images(
             Image,
             to_upsert,
             ["source", "source_image_id"],
-            ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "active", "source_last_seen_at", "updated_at"],
+            ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "dna_verified", "active", "source_last_seen_at", "updated_at"],
         )
     return len(items), touched_taxa
 
@@ -361,6 +387,57 @@ def _stage_observations(path: str, stage: sqlite3.Connection, fungal_ids: set[in
     return count
 
 
+def _stage_dna_observations(path: str, stage: sqlite3.Connection) -> int:
+    stage.execute("CREATE TABLE dna_observations (uuid TEXT PRIMARY KEY)")
+    batch: list[tuple[str]] = []
+    count = 0
+    for row in stream_tsv(path, ("observation_uuid",)):
+        observation_uuid = row["observation_uuid"].strip()
+        if not observation_uuid:
+            continue
+        batch.append((observation_uuid,))
+        if len(batch) >= 10_000:
+            stage.executemany("INSERT OR IGNORE INTO dna_observations VALUES (?)", batch)
+            stage.commit()
+            count += len(batch)
+            logger.info("staged %d iNaturalist DNA-verified observations", count)
+            batch.clear()
+    if batch:
+        stage.executemany("INSERT OR IGNORE INTO dna_observations VALUES (?)", batch)
+        stage.commit()
+        count += len(batch)
+    if count == 0:
+        raise ValueError("The iNaturalist DNA-observation list was empty")
+    return count
+
+
+def _deactivate_observations_without_dna(session: Session, stage: sqlite3.Connection, started: datetime) -> int:
+    """Hide existing photos for fungal observations no longer carrying the ITS field."""
+    cursor = stage.execute(
+        "SELECT o.uuid FROM fungal_observations o "
+        "LEFT JOIN dna_observations d ON d.uuid=o.uuid "
+        "WHERE d.uuid IS NULL"
+    )
+    count = 0
+    while rows := cursor.fetchmany(500):
+        observation_uuids = [str(row[0]) for row in rows if row[0]]
+        if not observation_uuids:
+            continue
+        session.execute(
+            update(Image)
+            .where(
+                Image.source == "inaturalist",
+                Image.source_observation_id.in_(observation_uuids),
+            )
+            .values(active=False, dna_verified=False, updated_at=started)
+        )
+        session.commit()
+        count += len(observation_uuids)
+        if count % 50_000 < len(observation_uuids):
+            logger.info("checked %d fungal observations without ITS evidence", count)
+    return count
+
+
 def import_bulk(
     session: Session,
     taxa_path: str,
@@ -368,6 +445,7 @@ def import_bulk(
     observers_path: str,
     photos_path: str,
     *,
+    dna_observations_path: str,
     stage_dir: str = "/var/lib/images-import",
     aliases_path: str | None = None,
     taxonomy_archive: str | None = None,
@@ -441,6 +519,8 @@ def import_bulk(
 
             obs_count = _stage_observations(observations_path, stage, fungal_ids)
             logger.info("staged %d fungal observations", obs_count)
+            dna_observation_count = _stage_dna_observations(dna_observations_path, stage)
+            logger.info("staged %d DNA-verified observation IDs", dna_observation_count)
             stage.execute("CREATE TABLE observers (observer_id TEXT PRIMARY KEY, login TEXT, name TEXT)")
             observer_batch = []
             observer_count = 0
@@ -475,7 +555,8 @@ def import_bulk(
                     continue
                 obs = lookup.execute(
                     "SELECT o.taxon_id, o.observer_id, t.app_taxon_id FROM fungal_observations o "
-                    "JOIN fungal_taxa t ON t.inat_taxon_id=o.taxon_id WHERE o.uuid=?",
+                    "JOIN fungal_taxa t ON t.inat_taxon_id=o.taxon_id "
+                    "JOIN dna_observations d ON d.uuid=o.uuid WHERE o.uuid=?",
                     (row["observation_uuid"],),
                 ).fetchone()
                 if not obs or obs[2] is None:
@@ -510,6 +591,7 @@ def import_bulk(
                         "license": display_license,
                         "attribution": attribution,
                         "display_eligible": True,
+                        "dna_verified": True,
                         "active": True,
                         "source_last_seen_at": started,
                         "updated_at": started,
@@ -538,11 +620,21 @@ def import_bulk(
 
             processed = taxa_count + obs_count + image_count
             if full_reconciliation:
+                unverified_observations = _deactivate_observations_without_dna(session, stage, started)
+                logger.info("deactivated images for %d fungal observations without ITS evidence", unverified_observations)
                 session.execute(
                     update(Taxon)
                     .where(
                         or_(Taxon.inat_taxon_id == root_taxon_id, Taxon.ancestry.like(f"%/{root_taxon_id}/%")),
                         Taxon.last_synced_at < started,
+                    )
+                    .values(active=False)
+                )
+                session.execute(
+                    update(Image)
+                    .where(
+                        Image.source == "inaturalist",
+                        Image.dna_verified.is_(False),
                     )
                     .values(active=False)
                 )
@@ -570,6 +662,7 @@ def main() -> None:
     parser.add_argument("--observations", required=True)
     parser.add_argument("--observers", required=True)
     parser.add_argument("--photos", required=True)
+    parser.add_argument("--dna-observations", required=True, help="TSV of iNaturalist observation UUIDs with the DNA Barcode ITS field")
     parser.add_argument("--aliases")
     parser.add_argument("--taxonomy-dwca", help="iNaturalist taxonomy Darwin Core Archive ZIP")
     parser.add_argument("--stage-dir", default="/var/lib/images-import")
@@ -585,6 +678,7 @@ def main() -> None:
             args.observations,
             args.observers,
             args.photos,
+            dna_observations_path=args.dna_observations,
             stage_dir=args.stage_dir,
             aliases_path=args.aliases,
             taxonomy_archive=args.taxonomy_dwca,

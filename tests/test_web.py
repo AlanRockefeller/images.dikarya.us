@@ -50,6 +50,21 @@ def test_unauthorized_voting_rejected(client, taxon, add_image):
     assert response.status_code == 401
 
 
+def test_unverified_images_are_hidden_and_cannot_be_voted_on(client, taxon, add_image):
+    verified_id = add_image(151)
+    unverified_id = add_image(152, dna_verified=False)
+    page = client.get(taxon_path(client, taxon))
+    assert f"/photos/151/medium.jpeg" in page.text
+    assert f"/photos/152/medium.jpeg" not in page.text
+    csrf = register_client(client)
+    response = client.post(
+        f"/taxon/{taxon}/image/{unverified_id}/toggle",
+        data={"csrf": csrf},
+    )
+    assert response.status_code == 409
+    assert verified_id != unverified_id
+
+
 def test_select_and_remove_normalizes_ranks(client, database, taxon, add_image):
     first, second, third, fourth = [add_image(i) for i in range(201, 205)]
     csrf = register_client(client)
@@ -145,7 +160,9 @@ def test_directory_searches_alias_and_taxon_page(client, database, taxon, add_im
     page = client.get("/taxa?q=Fly+agaric")
     assert "Amanita muscaria" in page.text
     assert f"/taxon/{taxon}" in page.text
-    assert client.get(taxon_path(client, taxon)).status_code == 200
+    taxon_page = client.get(taxon_path(client, taxon))
+    assert taxon_page.status_code == 200
+    assert "DNA sequence evidence recorded" in taxon_page.text
 
 
 def test_directory_defaults_to_species_and_all_ranks_is_available(client, database, taxon, add_image):
@@ -259,9 +276,10 @@ def test_admin_can_manually_map_unresolved_mushroom_observer_name(client, databa
             source="mushroom_observer",
             source_image_id="mo-image-200",
             medium_url="https://mushroomobserver.org/images/640/200.jpg",
-            source_page_url="https://mushroomobserver.org/observations/300",
-            display_eligible=True,
-            active=False,
+                source_page_url="https://mushroomobserver.org/observations/300",
+                display_eligible=True,
+                dna_verified=True,
+                active=False,
         )
         db.add(image)
         db.flush()

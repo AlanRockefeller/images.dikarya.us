@@ -26,6 +26,7 @@ from images_app.importers.common import (
 from images_app.importers.inaturalist import (
     DISPLAY_LICENSES,
     DISPLAY_LICENSE_LABELS,
+    has_dna_barcode_its,
     normalize_ancestry,
     upsert_inaturalist_images,
 )
@@ -205,7 +206,7 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
         "source_taxon_id": None,
         "source": "inaturalist",
         "source_image_id": str(photo_id),
-        "source_observation_id": str(observation_id),
+        "source_observation_id": str(observation.get("uuid") or observation_id),
         "medium_url": urls[0],
         "thumbnail_url": urls[1],
         "source_page_url": f"https://www.inaturalist.org/observations/{observation_id}",
@@ -213,6 +214,7 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
         "license": display_license,
         "attribution": attribution,
         "display_eligible": True,
+        "dna_verified": True,
         "active": True,
         "source_last_seen_at": seen_at,
         "updated_at": seen_at,
@@ -276,6 +278,11 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
                 except (KeyError, ValueError, TypeError):
                     continue
                 observation_ids.append(str(obs_id))
+                observation_uuid = str(observation.get("uuid") or "").strip()
+                if observation_uuid:
+                    observation_ids.append(observation_uuid)
+                if not has_dna_barcode_its(observation):
+                    continue
                 try:
                     ext_taxon = int((observation.get("taxon") or {}).get("id"))
                 except (KeyError, ValueError, TypeError):

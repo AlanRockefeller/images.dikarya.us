@@ -21,6 +21,7 @@
           <div class="image-caption">
             <div class="attribution-line"><span class="photographer">{{ image.photographer or "Photographer not listed" }}</span><span class="source-tag">{% if image.source == "inaturalist" %}iNaturalist{% else %}Mushroom Observer{% endif %}</span></div>
             <p class="license-line">{{ image.license or "License not listed" }}{% if image.attribution %}<span> · {{ image.attribution }}</span>{% endif %}</p>
+            <p class="dna-evidence">DNA sequence evidence recorded for this observation</p>
             <a class="source-link" href="{{ image.source_page_url }}" target="_blank" rel="noopener noreferrer">View source record ↗</a>
             <div class="aggregate-line"><span>{{ rank_one }} first-place · {{ picked_by }} voters</span>{% if average_rank %}<span>avg. {{ "%.1f"|format(average_rank) }}</span>{% endif %}</div>
             {% if user and my_rank %}<div class="reorder-controls">
@@ -39,6 +40,6 @@
       {% if next_url %}<a href="{{ next_url }}" hx-get="{{ next_url }}" hx-target="#gallery" hx-select="#gallery" hx-swap="outerHTML" hx-push-url="true">More images →</a>{% endif %}
     </nav>{% endif %}
   {% else %}
-    <div class="empty-state"><h2>No licensed images yet</h2><p>Images appear here after source records have been imported and their licenses checked.</p></div>
+    <div class="empty-state"><h2>No DNA-verified licensed images yet</h2><p>Images appear after a DNA sequence record and a displayable license are confirmed at the source.</p></div>
   {% endif %}
 </section>
