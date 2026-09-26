@@ -138,8 +138,9 @@ def upsert_inaturalist_images(
                 photographer,
                 medium_url,
                 display_eligible,
+                dna_verified,
             )
-            for photo_id, taxon_id, observation_id, license_name, photographer, medium_url, display_eligible in session.execute(
+            for photo_id, taxon_id, observation_id, license_name, photographer, medium_url, display_eligible, dna_verified in session.execute(
                 select(
                     Image.source_image_id,
                     Image.taxon_id,
@@ -148,6 +149,7 @@ def upsert_inaturalist_images(
                     Image.photographer,
                     Image.medium_url,
                     Image.display_eligible,
+                    Image.dna_verified,
                 ).where(Image.source == "inaturalist", Image.source_image_id.in_(photo_ids))
             )
         }
@@ -155,15 +157,15 @@ def upsert_inaturalist_images(
         for photo_id, row in batch:
             conflicts = grouped_conflicts.get(photo_id, set())
             previous = existing.get(photo_id)
-            # Null taxon / ineligible rows are the durable marker for a photo
-            # whose source observations disagree. Do not reactivate it just
-            # because an incremental page contains only one association.
-            if previous and previous[0] is None:
+            # Keep conflict tombstones only when they came from a row that
+            # was previously DNA-verified. Pre-migration bulk rows have no
+            # trustworthy observation-field status and are rebuilt here.
+            if previous and previous[6] and previous[0] is None:
                 conflicts.add("taxon")
-            if previous and not previous[5]:
+            if previous and previous[6] and not previous[5]:
                 conflicts.add("metadata")
             different_observation = bool(
-                previous and previous[1] != row.get("source_observation_id")
+                previous and previous[6] and previous[1] != row.get("source_observation_id")
             )
             if different_observation and previous[0] is not None and previous[0] != row["taxon_id"]:
                 conflicts.add("taxon")

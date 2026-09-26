@@ -14,7 +14,6 @@ import pytest
 from sqlalchemy import func, select
 
 from images_app.importers.inaturalist import import_bulk, upsert_inaturalist_images
-from images_app.importers.inaturalist_dna import export_dna_observation_uuids
 from images_app.importers.inaturalist_incremental import incremental_sync
 from images_app.importers.mushroom_observer import (
     _sqlite_stage,
@@ -24,8 +23,9 @@ from images_app.importers.mushroom_observer import (
     recompute_mo_image_taxa,
 )
 import images_app.importers.common as importer_common
-from images_app.importers.common import stream_tsv
+from images_app.importers.common import delete_unverified_images_without_votes, stream_tsv
 from images_app.models import Image, ImageSourceTaxon, SourceTaxon, SyncState, Taxon, TaxonAlias, User, Vote
+from images_app.importers.inaturalist_reconcile import synchronize_dna_images
 
 
 def write_tsv(path, headers, rows, gz=False):
@@ -90,28 +90,152 @@ def test_inaturalist_bulk_import_is_idempotent(database, tmp_path):
         assert state.status == "success"
 
 
-def test_inaturalist_dna_export_filters_nonempty_exact_its_field(tmp_path):
+def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old_rows(database, taxon, tmp_path):
+    archive_path = tmp_path / "taxonomy.dwca.zip"
+    rows = [
+        ["47170", "https://www.inaturalist.org/taxa/47170", "", "Fungi", "Fungi", "kingdom", ""],
+        ["444", "https://www.inaturalist.org/taxa/444", "https://www.inaturalist.org/taxa/47170", "Fungi", "Amanita", "genus", ""],
+        ["555001", "https://www.inaturalist.org/taxa/555001", "https://www.inaturalist.org/taxa/444", "Fungi", "Amanita muscaria", "species", ""],
+    ]
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        data = io.StringIO()
+        writer = csv.writer(data, lineterminator="\n")
+        writer.writerow(["id", "taxonID", "parentNameUsageID", "kingdom", "scientificName", "taxonRank", "references"])
+        writer.writerows(rows)
+        archive.writestr("taxa.csv", data.getvalue())
+    with database() as db:
+        db.add_all(
+            [
+                Image(
+                    source="inaturalist",
+                    source_image_id="legacy-unfiltered-image",
+                    source_observation_id="legacy-observation",
+                    medium_url="https://static.inaturalist.org/photos/1/medium.jpg",
+                    source_page_url="https://www.inaturalist.org/observations/legacy-observation",
+                    taxon_id=taxon,
+                    display_eligible=True,
+                    dna_verified=True,
+                    active=True,
+                ),
+                Image(
+                    source="inaturalist",
+                    source_image_id="990001",
+                    source_observation_id="old-conflicting-observation",
+                    medium_url="https://static.inaturalist.org/photos/990001/medium.jpg",
+                    source_page_url="https://www.inaturalist.org/observations/old-conflicting-observation",
+                    taxon_id=None,
+                    display_eligible=False,
+                    dna_verified=False,
+                    active=False,
+                ),
+            ]
+        )
+        db.commit()
+
     def respond(request):
-        assert request.url.params.get("field:DNA Barcode ITS") == ""
-        assert request.url.params.get("id_above") == "0"
+        assert request.url.params["taxon_id"] == "47170"
+        assert request.url.params["field:DNA Barcode ITS"] == ""
+        assert request.url.params["per_page"] == "200"
+        assert request.url.params["id_above"] == "0"
         return httpx.Response(
             200,
             json={
                 "results": [
-                    {"id": 10, "uuid": "with-its", "ofvs": [{"field_id": 2330, "value": "ACGT"}]},
-                    {"id": 11, "uuid": "blank-its", "ofvs": [{"field_id": 2330, "value": "  "}]},
-                    {"id": 12, "uuid": "other-field", "ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT"}]},
-                    {"id": 13, "uuid": "named-its", "ofvs": [{"name": "DNA Barcode ITS", "value": "ACGT"}]},
+                    {
+                        "id": 700001,
+                        "uuid": "dna-observation",
+                        "taxon": {"id": 555001},
+                        "user": {"login": "fungi-user", "name": "Fungi User"},
+                        "ofvs": [{"field_id": 2330, "value": "ACGT"}],
+                        "photos": [
+                            {
+                                "id": 990001,
+                                "url": "https://static.inaturalist.org/photos/990001/square.jpg",
+                                "license_code": "cc-by",
+                                "attribution": "© Fungi User, CC BY",
+                            },
+                            {
+                                "id": 990002,
+                                "url": "https://static.inaturalist.org/photos/990002/square.jpg",
+                                "license_code": None,
+                            },
+                        ],
+                    },
+                    {
+                        "id": 700002,
+                        "uuid": "blank-field",
+                        "taxon": {"id": 555001},
+                        "ofvs": [{"field_id": 2330, "value": "  "}],
+                        "photos": [],
+                    },
+                    {
+                        "id": 700003,
+                        "uuid": "different-field",
+                        "taxon": {"id": 555001},
+                        "ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT"}],
+                        "photos": [],
+                    },
                 ]
             },
         )
 
     client = httpx.Client(transport=httpx.MockTransport(respond))
-    path = tmp_path / "dna-observations.tsv"
-    count = export_dna_observation_uuids(path, client=client, request_interval=0)
+    for _ in range(2):
+        with database() as db:
+            synchronize_dna_images(
+                db,
+                str(archive_path),
+                client=client,
+                request_interval=0,
+                stage_dir=str(tmp_path / "stage"),
+            )
     client.close()
-    assert count == 2
-    assert path.read_text(encoding="utf-8").splitlines() == ["observation_uuid", "with-its", "named-its"]
+    with database() as db:
+        assert db.scalar(select(func.count(Image.id))) == 1
+        image = db.scalar(select(Image).where(Image.source_image_id == "990001"))
+        assert image.dna_verified and image.active
+        assert image.source_observation_id == "dna-observation"
+        assert db.scalar(select(Image.id).where(Image.source_image_id == "990002")) is None
+        assert db.scalar(select(Image.id).where(Image.source_image_id == "legacy-unfiltered-image")) is None
+        assert db.get(Taxon, taxon).image_count == 1
+
+
+def test_unverified_cleanup_keeps_any_image_with_a_vote(database, taxon):
+    with database() as db:
+        user = User(name="Voter", email="voter@example.org", password_hash="test-hash")
+        db.add(user)
+        db.flush()
+        unvoted = Image(
+            source="inaturalist",
+            source_image_id="unverified-unvoted",
+            medium_url="https://static.inaturalist.org/photos/1/medium.jpg",
+            source_page_url="https://www.inaturalist.org/observations/1",
+            taxon_id=taxon,
+            dna_verified=False,
+            display_eligible=True,
+            active=True,
+        )
+        voted = Image(
+            source="inaturalist",
+            source_image_id="unverified-voted",
+            medium_url="https://static.inaturalist.org/photos/2/medium.jpg",
+            source_page_url="https://www.inaturalist.org/observations/2",
+            taxon_id=taxon,
+            dna_verified=False,
+            display_eligible=True,
+            active=True,
+        )
+        db.add_all([unvoted, voted])
+        db.flush()
+        db.add(Vote(user_id=user.id, taxon_id=taxon, image_id=voted.id, rank=1))
+        db.commit()
+        unvoted_id, voted_id = unvoted.id, voted.id
+
+        assert delete_unverified_images_without_votes(db, "inaturalist") == 1
+        assert db.get(Image, unvoted_id) is None
+        kept = db.get(Image, voted_id)
+        assert kept is not None and not kept.active and not kept.dna_verified
+        assert db.scalar(select(func.count(Vote.id)).where(Vote.image_id == voted_id)) == 1
 
 
 def test_full_reconciliation_imports_dwca_taxonomy_and_marks_missing_taxa_inactive(database, tmp_path):

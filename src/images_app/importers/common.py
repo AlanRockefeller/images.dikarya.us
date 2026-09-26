@@ -13,12 +13,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from images_app.models import Image, SyncState, Taxon, utcnow
+from images_app.models import Image, SyncState, Taxon, Vote, utcnow
 
 logger = logging.getLogger("images_app.importers")
 STREAM_HOSTS = {"inaturalist-open-data.s3.amazonaws.com", "mushroomobserver.org"}
@@ -223,3 +223,43 @@ def refresh_image_counts(session: Session, taxon_ids: Iterable[int] | None = Non
     if selected_ids is not None:
         statement = statement.where(Taxon.id.in_(selected_ids))
     session.execute(statement)
+
+
+def delete_unverified_images_without_votes(
+    session: Session, source: str, *, batch_size: int = 5000
+) -> int:
+    """Remove obsolete unverified image metadata while retaining any voted image row."""
+    session.execute(
+        update(Image)
+        .where(Image.source == source, Image.dna_verified.is_(False))
+        .values(active=False)
+    )
+    session.commit()
+    has_votes = exists(select(1).select_from(Vote).where(Vote.image_id == Image.id))
+    deleted = 0
+    last_id = 0
+    while True:
+        image_ids = list(
+            session.scalars(
+                select(Image.id)
+                .where(
+                    Image.source == source,
+                    Image.dna_verified.is_(False),
+                    Image.id > last_id,
+                    ~has_votes,
+                )
+                .order_by(Image.id)
+                .limit(batch_size)
+            ).all()
+        )
+        if not image_ids:
+            break
+        session.execute(delete(Image).where(Image.id.in_(image_ids)))
+        session.commit()
+        deleted += len(image_ids)
+        last_id = image_ids[-1]
+        if deleted % 50_000 < len(image_ids):
+            logger.info("deleted %d obsolete %s image references without votes", deleted, source)
+    if deleted:
+        logger.info("deleted %d obsolete %s image references without votes", deleted, source)
+    return deleted

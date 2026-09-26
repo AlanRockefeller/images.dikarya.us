@@ -17,6 +17,7 @@ from images_app.config import settings
 from images_app.db import SessionLocal
 from images_app.importers.common import (
     begin_sync,
+    delete_unverified_images_without_votes,
     fail_sync,
     finish_sync,
     insert_ignore_rows,
@@ -602,13 +603,14 @@ def import_exports(
                         Image.source == "mushroom_observer",
                         or_(Image.source_last_seen_at.is_(None), Image.source_last_seen_at < started),
                     )
-                    .values(active=False)
+                    .values(active=False, dna_verified=False)
                 )
                 session.execute(
                     delete(ImageSourceTaxon).where(
                         or_(ImageSourceTaxon.last_seen_at.is_(None), ImageSourceTaxon.last_seen_at < started)
                     )
                 )
+                delete_unverified_images_without_votes(session, "mushroom_observer")
             changed_taxa.update(
                 recompute_mo_image_taxa(
                     session,

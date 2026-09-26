@@ -7,7 +7,7 @@ A server-rendered FastAPI site for browsing licensed taxon photographs and letti
 - FastAPI, Jinja2, locally vendored HTMX 2.0.4, and plain CSS; the browser loads source-hosted images directly. The pinned HTMX license is in `third_party/`.
 - PostgreSQL through SQLAlchemy 2.x, with Alembic migrations.
 - Argon2id password hashing and signed, HttpOnly session cookies with per-session CSRF tokens.
-- [iNaturalist Open Data](https://github.com/inaturalist/inaturalist-open-data) for bulk taxonomy and licensed photo metadata, plus the rate-limited iNaturalist API to identify observations with the DNA Barcode ITS field. Mushroom Observer's [nightly CSV exports](https://github.com/MushroomObserver/mushroom-observer/blob/main/README_API.md#csv-files) provide image/name links; its supported sequences API supplies observation-level DNA evidence.
+- The official [iNaturalist taxonomy archive](https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip) supplies canonical taxa. Its field-filtered API supplies image metadata only for observations with a non-empty DNA Barcode ITS value. Mushroom Observer's [nightly CSV exports](https://github.com/MushroomObserver/mushroom-observer/blob/main/README_API.md#csv-files) provide image/name links; its supported sequences API supplies observation-level DNA evidence.
 - No image files are stored here. Each displayed image includes source, creator, license, and a source record link.
 - A restrictive same-origin Content Security Policy keeps executable code local; external hosts are permitted only as image sources.
 
@@ -44,35 +44,29 @@ Run `pytest`. Tests use an isolated SQLite database where possible and never con
 
 Import commands are restartable and upsert by source identifiers. They stream tab-separated/gzip input and report counts. Do not download or serve photos without an allowed license; the iNaturalist adapter allows CC0, the Public Domain Mark, CC BY, and CC BY-SA for display by default. Change that policy only after review.
 
-### iNaturalist bulk import
+### iNaturalist DNA-only reconciliation
 
-The importer uses the official bucket's `taxa.csv.gz`, `observations.csv.gz`, `observers.csv.gz`, and `photos.csv.gz` directly over HTTPS, and reads the current taxonomy archive from a local ZIP. The open-data files do not contain observation-field values, so first create a list of observation UUIDs whose non-empty field is iNaturalist's exact **DNA Barcode ITS** field (field ID 2330):
+The monthly job downloads the current taxonomy DwC-A (about 80 MB) and imports its accepted fungal taxa. It then requests observations from the iNaturalist API with the exact **DNA Barcode ITS** field filter (field ID 2330), handling up to 200 observations per request and pacing requests at about one per second. The response includes each observation's photo URLs, licenses, and attribution; the importer keeps only explicitly displayable licenses. It does not download or scan the much larger open-data observation, observer, and photo dumps. The API request count is capped below iNaturalist's [recommended daily limit](https://www.inaturalist.org/pages/api+recommended+practices). The job is idempotent and only reconciles old image rows after a complete scan. Images absent from that completed DNA-filtered scan are deactivated; unverified image metadata with no votes is deleted in batches. If any image has votes, it is retained inactive so the vote history stays auditable. The taxon table is retained.
+
+To run the reconciliation manually:
 
 ```sh
-python -m images_app.importers.inaturalist_dna \
-  --output /var/lib/images-import/inaturalist-open-data/dna-observations.tsv
-
-python -m images_app.importers.inaturalist \
-  --taxa https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz \
-  --observations https://inaturalist-open-data.s3.amazonaws.com/observations.csv.gz \
-  --observers https://inaturalist-open-data.s3.amazonaws.com/observers.csv.gz \
-  --photos https://inaturalist-open-data.s3.amazonaws.com/photos.csv.gz \
-  --dna-observations /var/lib/images-import/inaturalist-open-data/dna-observations.tsv \
-  --taxonomy-dwca /var/lib/images-import/inaturalist-taxonomy.dwca.zip \
-  --full-reconciliation
+python -m images_app.importers.inaturalist_reconcile \
+  --taxonomy-dwca /var/lib/images-import/inaturalist-open-data/inaturalist-taxonomy.dwca.zip \
+  --stage-dir /var/lib/images-import
 ```
 
-The DwC-A supplies the accepted fungal taxonomy (including taxa without images); the API's field-filtered observation results identify UUIDs with DNA evidence; and the open-data photo metadata supplies image references, observer attribution, and licenses. The field-list command fetches pages of up to 200 observations at about one request per second, staying within iNaturalist's [recommended API practices](https://www.inaturalist.org/pages/api+recommended+practices). It does not make a request per observation. The bulk importer streams remote gzip data into temporary SQLite staging files, validates HTTPS hosts, derives medium-size image URLs, and stores no image files. Only photos attached to a DNA-qualified observation and carrying a displayable license become public. Existing rows default to unverified and are hidden after the migration; each full reconciliation also deactivates prior photos for fungal observations that no longer have the DNA field. Photos absent from the monthly image snapshot retain the existing 45-day stale grace period. Votes remain intact. The monthly job still streams the official metadata snapshot and runs at low CPU and I/O priority.
+Only image metadata is stored locally. External image files continue to load from their source URLs.
 
 ### Daily incremental synchronization
 
-`python -m images_app.importers.inaturalist_incremental` asks the iNaturalist API only for observations updated since the persisted cursor (page size 200, custom User-Agent, at least one second between requests, bounded with an ID cursor). It retires an observation's old images when the ITS field is removed or emptied, and imports licensed photos only when the field contains a value. If a long scan hits its request cap, it resumes by ID, then replays the entire same update window from ID zero before advancing the cursor. That replay catches lower-ID records edited while the backlog was being processed. The API is not used for per-observation bulk lookups.
+`python -m images_app.importers.inaturalist_incremental` asks the iNaturalist API only for observations updated since the persisted cursor (page size 200, custom User-Agent, at least one second between requests, bounded with an ID cursor). It retires an observation's old images when the ITS field is removed or emptied, and imports licensed photos only when the field contains a value. If a long scan hits its request cap, it resumes by ID, then replays the entire same update window from ID zero before advancing the cursor. That replay catches lower-ID records edited while the backlog was being processed. The API is not used for per-observation requests.
 
 `python -m images_app.importers.mushroom_observer --observations https://mushroomobserver.org/observations.csv --images-observations https://mushroomobserver.org/images_observations.csv --images https://mushroomobserver.org/images.csv --names https://mushroomobserver.org/names.csv` streams the official nightly exports. Despite their `.csv` names, the live export files are tab-delimited; the four endpoint headers and sample rows were checked on 2026-09-24. Because the published MO CSV set does not include sequence records, the importer also reads the supported sequences API in pages of 1,000, waiting at least five seconds between requests. Only images linked to observations with non-empty sequence bases or an accession are considered; it does not scrape rendered pages. The importer bounds SQLite name-ID lookups and persists every image-to-name association for qualifying observations. MO names are matched by exact accepted scientific name, MO synonym links, or a unique known alias. If an image has conflicting qualified names, it remains unpublished until every associated name maps to the same iNaturalist taxon. Ambiguous/unmatched names remain in `source_taxa` for review; no fuzzy guess is published. Manual mappings recompute affected images and image counts.
 
 ### Full reconciliation
 
-Run the iNaturalist bulk command monthly with a fresh open-data snapshot and taxonomy DwC-A using `--full-reconciliation`. Reconciliation marks inactive/missing taxa based on the full accepted taxonomy and deactivates unverified or absent image references. The importer streams the metadata files and keeps only the taxonomy archive and bounded SQLite join state on disk. MO's current structured sources are its nightly database CSV exports and paginated sequences API; rerunning that importer is idempotent and updates source records in place.
+Run the DNA-only iNaturalist reconciliation monthly. It refreshes the accepted taxonomy archive and then queries only DNA Barcode ITS observations for image metadata. MO's current structured sources are its nightly database CSV exports and paginated sequences API; rerunning that importer is idempotent and updates source records in place. At the end of a successful MO import, stale images without sequence evidence are deactivated and unvoted unverified records are pruned in batches.
 
 All import commands create/update `sync_state` records and return nonzero on failure. `flock` in the provided systemd units prevents overlapping daily jobs. Store downloaded files under a separately managed data directory, not the source tree.
 
@@ -115,7 +109,7 @@ systemctl enable --now images-import-daily.timer images-import-reconcile.timer
 
 If resuming after an interrupted deployment, skip the virtual-environment and `pip install` lines when the venv and dependencies are already present. The systemd units put `src/` first on `PYTHONPATH`, so the app runs from the checked-out source; installing the package again is not needed to pick up source changes. The ownership and mode repair is safe to repeat.
 
-The daily unit streams the official nightly MO CSVs, refreshes the MO sequence-observation list under MO's API pacing guidance, and runs the bounded iNaturalist incremental synchronizer. The monthly reconcile unit filters the official iNaturalist photo metadata through the DNA Barcode ITS observation list. Check available bandwidth before enabling the monthly timer. Run the initial imports manually and review their results before enabling unattended schedules. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
+The daily unit streams the official nightly MO CSVs, refreshes the MO sequence-observation list under MO's API pacing guidance, and runs the bounded iNaturalist incremental synchronizer. The monthly reconcile unit downloads the taxonomy archive and obtains photo metadata only from DNA Barcode ITS observations. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
 
 After deployment, create the first administrator interactively with `sudo -u images env APP_ROOT=/var/www/images.dikarya.us/app PYTHONPATH=/var/www/images.dikarya.us/app/src /var/www/images.dikarya.us/app/.venv/bin/python -m images_app.cli create-admin`.
 
