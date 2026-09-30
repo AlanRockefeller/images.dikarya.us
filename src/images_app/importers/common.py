@@ -229,12 +229,8 @@ def delete_unverified_images_without_votes(
     session: Session, source: str, *, batch_size: int = 5000
 ) -> int:
     """Remove obsolete unverified image metadata while retaining any voted image row."""
-    session.execute(
-        update(Image)
-        .where(Image.source == source, Image.dna_verified.is_(False))
-        .values(active=False)
-    )
-    session.commit()
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     has_votes = exists(select(1).select_from(Vote).where(Vote.image_id == Image.id))
     deleted = 0
     last_id = 0
@@ -246,7 +242,6 @@ def delete_unverified_images_without_votes(
                     Image.source == source,
                     Image.dna_verified.is_(False),
                     Image.id > last_id,
-                    ~has_votes,
                 )
                 .order_by(Image.id)
                 .limit(batch_size)
@@ -254,11 +249,20 @@ def delete_unverified_images_without_votes(
         )
         if not image_ids:
             break
-        session.execute(delete(Image).where(Image.id.in_(image_ids)))
+        # Delete unvoted rows directly: updating them first creates unnecessary
+        # PostgreSQL row versions and WAL. Only retained voted rows need hiding.
+        session.execute(
+            update(Image)
+            .where(Image.id.in_(image_ids), has_votes, Image.active.is_(True))
+            .values(active=False)
+        )
+        result = session.execute(
+            delete(Image).where(Image.id.in_(image_ids), ~has_votes)
+        )
         session.commit()
-        deleted += len(image_ids)
+        deleted += result.rowcount
         last_id = image_ids[-1]
-        if deleted % 50_000 < len(image_ids):
+        if result.rowcount and deleted % 50_000 < result.rowcount:
             logger.info("deleted %d obsolete %s image references without votes", deleted, source)
     if deleted:
         logger.info("deleted %d obsolete %s image references without votes", deleted, source)

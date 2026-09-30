@@ -225,17 +225,22 @@ def test_unverified_cleanup_keeps_any_image_with_a_vote(database, taxon):
             display_eligible=True,
             active=True,
         )
-        db.add_all([unvoted, voted])
+        db.add_all([voted, unvoted] if voted_first else [unvoted, voted])
         db.flush()
         db.add(Vote(user_id=user.id, taxon_id=taxon, image_id=voted.id, rank=1))
         db.commit()
         unvoted_id, voted_id = unvoted.id, voted.id
 
-        assert delete_unverified_images_without_votes(db, "inaturalist") == 1
+        assert delete_unverified_images_without_votes(db, "inaturalist", batch_size=1) == 1
         assert db.get(Image, unvoted_id) is None
         kept = db.get(Image, voted_id)
         assert kept is not None and not kept.active and not kept.dna_verified
         assert db.scalar(select(func.count(Vote.id)).where(Vote.image_id == voted_id)) == 1
+        db.refresh(kept)
+        kept_updated_at = kept.updated_at
+        assert delete_unverified_images_without_votes(db, "inaturalist", batch_size=1) == 0
+        db.refresh(kept)
+        assert kept.updated_at == kept_updated_at
 
 
 def test_inaturalist_reconcile_retries_connection_drop_and_429(monkeypatch):
