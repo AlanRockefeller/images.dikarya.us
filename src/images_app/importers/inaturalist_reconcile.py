@@ -25,7 +25,7 @@ from images_app.importers.common import (
 from images_app.importers.inaturalist import (
     OBSERVATIONS_API_URL,
     _link_taxon_parents,
-    has_dna_barcode_its,
+    dna_barcode_its_status,
     import_dwca_taxonomy,
     upsert_inaturalist_images,
 )
@@ -109,11 +109,7 @@ def _iter_observation_pages(
             raise ValueError("iNaturalist API pagination made no forward progress")
         last_id = max(page_ids)
         page_number += 1
-        yield [
-            observation
-            for observation in results
-            if isinstance(observation, dict) and has_dna_barcode_its(observation)
-        ]
+        yield [observation for observation in results if isinstance(observation, dict)]
         if page_number % 100 == 0:
             logger.info("read %d iNaturalist DNA-filtered observation pages", page_number)
         if len(results) < PAGE_SIZE:
@@ -130,7 +126,7 @@ def synchronize_dna_images(
     client: httpx.Client | None = None,
     request_interval: float = 2.0,
 ) -> int:
-    """Reconcile fungal taxonomy and only images on observations with an ITS field."""
+    """Reconcile fungal taxonomy and images with an ITS sequence or record pointer."""
     started = begin_sync(session, "inaturalist")
     stage_root = Path(stage_dir)
     owns_client = client is None
@@ -160,6 +156,12 @@ def synchronize_dna_images(
         changed_taxa: set[int] = set()
         observation_count = 0
         image_count = 0
+        field_counts = {
+            "sequence": 0,
+            "observation_reference": 0,
+            "empty": 0,
+            "missing": 0,
+        }
         image_batch: list[dict] = []
 
         for page in _iter_observation_pages(
@@ -167,9 +169,15 @@ def synchronize_dna_images(
             root_taxon_id=root_taxon_id,
             request_interval=request_interval,
         ):
-            observation_count += len(page)
-            external_ids: set[int] = set()
+            eligible_page = []
             for observation in page:
+                status = dna_barcode_its_status(observation)
+                field_counts[status] += 1
+                if status in {"sequence", "observation_reference"}:
+                    eligible_page.append(observation)
+            observation_count += len(eligible_page)
+            external_ids: set[int] = set()
+            for observation in eligible_page:
                 try:
                     external_ids.add(int((observation.get("taxon") or {}).get("id")))
                 except (TypeError, ValueError):
@@ -185,7 +193,7 @@ def synchronize_dna_images(
                     ).all()
                 )
 
-            for observation in page:
+            for observation in eligible_page:
                 try:
                     external_taxon_id = int((observation.get("taxon") or {}).get("id"))
                 except (TypeError, ValueError):
@@ -220,7 +228,7 @@ def synchronize_dna_images(
                 )
 
         if observation_count == 0:
-            raise ValueError("iNaturalist returned no fungal observations with a non-empty ITS barcode field")
+            raise ValueError("iNaturalist returned no fungal observations with an ITS sequence or observation pointer")
         if image_batch:
             inserted, touched = upsert_inaturalist_images(
                 session,
@@ -257,7 +265,14 @@ def synchronize_dna_images(
         processed += image_count
         finish_sync(session, "inaturalist", started, processed, cursor=started.isoformat())
         logger.info(
-            "iNaturalist DNA-only reconciliation completed: %d observations, %d licensed photos",
+            "iNaturalist ITS field values: %d sequences, %d observation pointers, %d empty, %d missing",
+            field_counts["sequence"],
+            field_counts["observation_reference"],
+            field_counts["empty"],
+            field_counts["missing"],
+        )
+        logger.info(
+            "iNaturalist DNA-only reconciliation completed: %d eligible observations, %d licensed photos",
             observation_count,
             image_count,
         )

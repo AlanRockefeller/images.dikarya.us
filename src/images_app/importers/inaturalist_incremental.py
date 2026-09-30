@@ -37,6 +37,8 @@ API_URL = "https://api.inaturalist.org/v1/observations"
 USER_AGENT = "DikaryaImages/0.1 (https://images.dikarya.us; taxonomy/image metadata synchronization)"
 PAGE_SIZE = 200
 MAX_REQUESTS_PER_RUN = 1000
+MAX_REQUEST_ATTEMPTS = 6
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _cursor_from_state(
@@ -221,7 +223,14 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
     }
 
 
-def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_taxon_id, max_requests: int = MAX_REQUESTS_PER_RUN, client: httpx.Client | None = None) -> int:
+def incremental_sync(
+    session: Session,
+    *,
+    root_taxon_id: int = settings.fungi_taxon_id,
+    max_requests: int = MAX_REQUESTS_PER_RUN,
+    client: httpx.Client | None = None,
+    request_interval: float = 2.0,
+) -> int:
     started = utcnow()
     since, id_above, phase, replay_started, legacy_cursor = _cursor_from_state(session, started)
     try:
@@ -258,13 +267,61 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
                 "order": "asc",
                 "id_above": last_id,
             }
-            response = http.get(API_URL, params=params)
-            response.raise_for_status()
+            response = None
+            request_limit_reached = False
+            for attempt in range(MAX_REQUEST_ATTEMPTS):
+                if page_requests >= max_requests:
+                    request_limit_reached = True
+                    break
+                page_requests += 1
+                try:
+                    response = http.get(API_URL, params=params)
+                except httpx.TransportError as exc:
+                    if page_requests >= max_requests:
+                        request_limit_reached = True
+                        break
+                    if attempt == MAX_REQUEST_ATTEMPTS - 1:
+                        raise
+                    delay = max(request_interval, min(60.0, 2.0**attempt))
+                    logger.warning(
+                        "iNaturalist connection failed (%s); retrying in %.1fs",
+                        exc.__class__.__name__,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                if response.status_code in RETRYABLE_STATUS_CODES:
+                    if page_requests >= max_requests:
+                        request_limit_reached = True
+                        break
+                    if attempt == MAX_REQUEST_ATTEMPTS - 1:
+                        response.raise_for_status()
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = (
+                            max(float(retry_after), request_interval)
+                            if retry_after
+                            else max(request_interval, min(60.0, 2.0**attempt))
+                        )
+                    except ValueError:
+                        delay = max(request_interval, min(60.0, 2.0**attempt))
+                    logger.warning(
+                        "iNaturalist API returned %d; retrying in %.1fs",
+                        response.status_code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                response.raise_for_status()
+                break
+            if request_limit_reached:
+                break
+            if response is None:
+                raise RuntimeError("No response from iNaturalist API")
             payload = response.json()
             results = payload.get("results")
             if not isinstance(results, list):
                 raise ValueError("Unexpected iNaturalist observations API response")
-            page_requests += 1
             if not results:
                 complete = True
                 break
@@ -333,7 +390,7 @@ def incremental_sync(session: Session, *, root_taxon_id: int = settings.fungi_ta
                 complete = True
                 break
             if page_requests < max_requests:
-                time.sleep(1.05)
+                time.sleep(request_interval)
         if not complete:
             partial_phase = "resume" if phase == "window" else phase
             next_cursor = json.dumps(

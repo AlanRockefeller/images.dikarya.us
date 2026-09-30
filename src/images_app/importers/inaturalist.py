@@ -44,13 +44,37 @@ DATASET_HOST = "inaturalist-open-data.s3.amazonaws.com"
 OBSERVATIONS_API_URL = "https://api.inaturalist.org/v1/observations"
 DNA_BARCODE_ITS_FIELD_ID = 2330
 DNA_BARCODE_ITS_FIELD_NAME = "dna barcode its"
+DNA_SEQUENCE_MIN_BASES = 50
+DNA_SEQUENCE_CHARS = frozenset("ACGTURYSWKMBDHVN-.")
+DNA_SEQUENCE_POINTER = re.compile(
+    r"\bsequence\s+(?:is\s+)?in\s+observation\s*(?:#\s*|(?:no\.?|number)\s*)?\d+\b",
+    re.IGNORECASE,
+)
 
 
-def has_dna_barcode_its(observation: dict) -> bool:
-    """Whether the observation has a non-empty value in iNat's ITS barcode field."""
+def _is_nucleotide_sequence(value: str) -> bool:
+    """Accept a substantial IUPAC nucleotide string, including wrapped FASTA."""
+    sequence_lines = [
+        line for line in value.splitlines() if not line.lstrip().startswith(">")
+    ]
+    payload = "".join(sequence_lines).upper()
+    if not payload or any(
+        character not in DNA_SEQUENCE_CHARS and not character.isspace() and not character.isdigit()
+        for character in payload
+    ):
+        return False
+    bases = [character for character in payload if character in DNA_SEQUENCE_CHARS and character not in "-."]
+    return len(bases) >= DNA_SEQUENCE_MIN_BASES
+
+
+def dna_barcode_its_status(observation: dict) -> str:
+    """Classify the ITS field as missing, empty, a sequence, or an observation pointer."""
     fields = observation.get("ofvs") or []
     if not isinstance(fields, list):
-        return False
+        return "missing"
+    field_exists = False
+    has_sequence = False
+    has_pointer = False
     for field in fields:
         if not isinstance(field, dict):
             continue
@@ -62,9 +86,24 @@ def has_dna_barcode_its(observation: dict) -> bool:
                 matching_field = int(field_id) == DNA_BARCODE_ITS_FIELD_ID
             except (TypeError, ValueError):
                 matching_field = False
-        if matching_field and str(field.get("value") or "").strip():
-            return True
-    return False
+        if not matching_field:
+            continue
+        field_exists = True
+        value = str(field.get("value") or "").strip()
+        if _is_nucleotide_sequence(value):
+            has_sequence = True
+        if DNA_SEQUENCE_POINTER.search(value):
+            has_pointer = True
+    if has_sequence:
+        return "sequence"
+    if has_pointer:
+        return "observation_reference"
+    return "empty" if field_exists else "missing"
+
+
+def has_dna_barcode_its(observation: dict) -> bool:
+    """Whether the ITS field contains sequence evidence or points to its record."""
+    return dna_barcode_its_status(observation) in {"sequence", "observation_reference"}
 
 
 def normalize_ancestry(value: str, own_id: int) -> tuple[list[int], str]:
@@ -664,7 +703,11 @@ def main() -> None:
     parser.add_argument("--observations", required=True)
     parser.add_argument("--observers", required=True)
     parser.add_argument("--photos", required=True)
-    parser.add_argument("--dna-observations", required=True, help="TSV of iNaturalist observation UUIDs with the DNA Barcode ITS field")
+    parser.add_argument(
+        "--dna-observations",
+        required=True,
+        help="TSV of iNaturalist observation UUIDs with an ITS sequence or observation pointer",
+    )
     parser.add_argument("--aliases")
     parser.add_argument("--taxonomy-dwca", help="iNaturalist taxonomy Darwin Core Archive ZIP")
     parser.add_argument("--stage-dir", default="/var/lib/images-import")

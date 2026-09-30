@@ -13,7 +13,12 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from images_app.importers.inaturalist import import_bulk, upsert_inaturalist_images
+from images_app.importers.inaturalist import (
+    dna_barcode_its_status,
+    has_dna_barcode_its,
+    import_bulk,
+    upsert_inaturalist_images,
+)
 from images_app.importers.inaturalist_incremental import incremental_sync
 from images_app.importers.mushroom_observer import (
     _sqlite_stage,
@@ -90,6 +95,29 @@ def test_inaturalist_bulk_import_is_idempotent(database, tmp_path):
         assert state.status == "success"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ACGT" * 20, "sequence"),
+        (">ITS barcode\n" + "ACGT" * 20, "sequence"),
+        ("Sequence in observation # 123456789", "observation_reference"),
+        ("  ", "empty"),
+        ("Sequencing pending", "empty"),
+        ("ACGT", "empty"),
+    ],
+)
+def test_dna_barcode_its_status_requires_sequence_or_observation_pointer(value, expected):
+    observation = {"ofvs": [{"field_id": 2330, "name": "DNA Barcode ITS", "value": value}]}
+    assert dna_barcode_its_status(observation) == expected
+    assert has_dna_barcode_its(observation) is (expected in {"sequence", "observation_reference"})
+
+
+def test_dna_barcode_its_status_does_not_confuse_a_different_field_with_a_blank_its_field():
+    observation = {"ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT" * 20}]}
+    assert dna_barcode_its_status(observation) == "missing"
+    assert not has_dna_barcode_its(observation)
+
+
 def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old_rows(database, taxon, tmp_path):
     archive_path = tmp_path / "taxonomy.dwca.zip"
     rows = [
@@ -146,7 +174,7 @@ def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old
                         "uuid": "dna-observation",
                         "taxon": {"id": 555001},
                         "user": {"login": "fungi-user", "name": "Fungi User"},
-                        "ofvs": [{"field_id": 2330, "value": "ACGT"}],
+                        "ofvs": [{"field_id": 2330, "value": "ACGT" * 20}],
                         "photos": [
                             {
                                 "id": 990001,
@@ -170,9 +198,37 @@ def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old
                     },
                     {
                         "id": 700003,
+                        "uuid": "placeholder-field",
+                        "taxon": {"id": 555001},
+                        "ofvs": [{"field_id": 2330, "value": "Sequencing pending"}],
+                        "photos": [
+                            {
+                                "id": 990003,
+                                "url": "https://static.inaturalist.org/photos/990003/square.jpg",
+                                "license_code": "cc-by",
+                                "attribution": "© Fungi User, CC BY",
+                            }
+                        ],
+                    },
+                    {
+                        "id": 700004,
+                        "uuid": "sequence-pointer",
+                        "taxon": {"id": 555001},
+                        "ofvs": [{"field_id": 2330, "value": "Sequence in observation # 123456789"}],
+                        "photos": [
+                            {
+                                "id": 990004,
+                                "url": "https://static.inaturalist.org/photos/990004/square.jpg",
+                                "license_code": "cc-by",
+                                "attribution": "© Fungi User, CC BY",
+                            }
+                        ],
+                    },
+                    {
+                        "id": 700005,
                         "uuid": "different-field",
                         "taxon": {"id": 555001},
-                        "ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT"}],
+                        "ofvs": [{"field_id": 999, "name": "DNA Barcode ITS", "value": "ACGT" * 20}],
                         "photos": [],
                     },
                 ]
@@ -191,16 +247,20 @@ def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old
             )
     client.close()
     with database() as db:
-        assert db.scalar(select(func.count(Image.id))) == 1
+        assert db.scalar(select(func.count(Image.id))) == 2
         image = db.scalar(select(Image).where(Image.source_image_id == "990001"))
         assert image.dna_verified and image.active
         assert image.source_observation_id == "dna-observation"
         assert db.scalar(select(Image.id).where(Image.source_image_id == "990002")) is None
+        pointer_image = db.scalar(select(Image).where(Image.source_image_id == "990004"))
+        assert pointer_image.dna_verified and pointer_image.active
+        assert db.scalar(select(Image.id).where(Image.source_image_id == "990003")) is None
         assert db.scalar(select(Image.id).where(Image.source_image_id == "legacy-unfiltered-image")) is None
-        assert db.get(Taxon, taxon).image_count == 1
+        assert db.get(Taxon, taxon).image_count == 2
 
 
-def test_unverified_cleanup_keeps_any_image_with_a_vote(database, taxon):
+@pytest.mark.parametrize("voted_first", [False, True])
+def test_unverified_cleanup_keeps_any_image_with_a_vote(database, taxon, voted_first):
     with database() as db:
         user = User(name="Voter", email="voter@example.org", password_hash="test-hash")
         db.add(user)
@@ -328,7 +388,7 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
                     "uuid": "obs-uuid-700001",
                     "taxon": {"id": 555001, "name": "Amanita muscaria", "rank": "species", "ancestry": "1/47170"},
                     "user": {"login": "fungi_user", "name": "Fungi User"},
-                    "ofvs": [{"field_id": 2330, "name": "DNA Barcode ITS", "value": "ACGT"}],
+                    "ofvs": [{"field_id": 2330, "name": "DNA Barcode ITS", "value": "ACGT" * 20}],
                     "photos": [
                         {
                             "id": 880001,
@@ -344,7 +404,7 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
 
     client = httpx.Client(transport=httpx.MockTransport(respond))
     with database() as db:
-        count = incremental_sync(db, client=client)
+        count = incremental_sync(db, client=client, request_interval=0)
     client.close()
     with database() as db:
         image = db.scalar(select(Image).where(Image.source_image_id == "880001"))
@@ -358,6 +418,41 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
         assert state.status == "success"
         assert '"since"' in state.cursor
         assert imported_taxon.image_count == 1
+
+
+def test_incremental_inaturalist_retries_rate_limit_and_connection_drop(database, taxon, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("images_app.importers.inaturalist_incremental.time.sleep", sleeps.append)
+    calls = 0
+
+    def respond(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.RemoteProtocolError("connection closed")
+        if calls == 2:
+            return httpx.Response(429, headers={"Retry-After": "5"})
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 700003,
+                        "uuid": "retry-observation",
+                        "taxon": {"id": 555001, "name": "Amanita muscaria", "rank": "species", "ancestry": "1/47170"},
+                        "ofvs": [{"field_id": 2330, "value": "ACGT" * 20}],
+                        "photos": [],
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    with database() as db:
+        assert incremental_sync(db, client=client, request_interval=0) == 1
+    client.close()
+    assert calls == 3
+    assert sleeps == [1, 5]
 
 
 def test_incremental_inaturalist_hides_existing_image_when_its_field_is_removed(database, taxon):
