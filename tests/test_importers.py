@@ -118,7 +118,7 @@ def test_dna_barcode_its_status_does_not_confuse_a_different_field_with_a_blank_
     assert not has_dna_barcode_its(observation)
 
 
-def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old_rows(database, taxon, tmp_path):
+def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old_rows(database, taxon, tmp_path, caplog):
     archive_path = tmp_path / "taxonomy.dwca.zip"
     rows = [
         ["47170", "https://www.inaturalist.org/taxa/47170", "", "Fungi", "Fungi", "kingdom", ""],
@@ -257,6 +257,7 @@ def test_inaturalist_full_reconcile_fetches_only_its_observations_and_prunes_old
         assert db.scalar(select(Image.id).where(Image.source_image_id == "990003")) is None
         assert db.scalar(select(Image.id).where(Image.source_image_id == "legacy-unfiltered-image")) is None
         assert db.get(Taxon, taxon).image_count == 2
+    assert "1 sequences, 1 observation pointers, 2 empty, 1 missing" in caplog.text
 
 
 @pytest.mark.parametrize("voted_first", [False, True])
@@ -378,7 +379,7 @@ def test_full_reconciliation_imports_dwca_taxonomy_and_marks_missing_taxa_inacti
         assert not old_image.active and not old_image.dna_verified
 
 
-def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database, taxon):
+def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database, taxon, caplog):
     def respond(request):
         assert request.url.params.get("per_page") == "200"
         payload = {
@@ -397,7 +398,14 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
                             "attribution": "© Fungi User, CC BY",
                         }
                     ],
-                }
+                },
+                {
+                    "id": 700002,
+                    "uuid": "obs-uuid-700002-empty-field",
+                    "taxon": {"id": 555001, "name": "Amanita muscaria", "rank": "species", "ancestry": "1/47170"},
+                    "ofvs": [{"field_id": 2330, "name": "DNA Barcode ITS", "value": "Sequencing pending"}],
+                    "photos": [],
+                },
             ]
         }
         return httpx.Response(200, json=payload)
@@ -410,7 +418,7 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
         image = db.scalar(select(Image).where(Image.source_image_id == "880001"))
         state = db.scalar(select(SyncState).where(SyncState.source == "inaturalist"))
         imported_taxon = db.get(Taxon, taxon)
-        assert count == 1
+        assert count == 2
         assert image.taxon_id == taxon
         assert image.dna_verified
         assert image.source_observation_id == "obs-uuid-700001"
@@ -418,6 +426,7 @@ def test_incremental_inaturalist_sync_uses_mock_api_and_persists_cursor(database
         assert state.status == "success"
         assert '"since"' in state.cursor
         assert imported_taxon.image_count == 1
+    assert "1 sequences, 0 observation pointers, 1 empty, 0 missing" in caplog.text
 
 
 def test_incremental_inaturalist_retries_rate_limit_and_connection_drop(database, taxon, monkeypatch):

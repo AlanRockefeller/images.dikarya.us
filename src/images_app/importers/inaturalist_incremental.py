@@ -26,7 +26,7 @@ from images_app.importers.common import (
 from images_app.importers.inaturalist import (
     DISPLAY_LICENSES,
     DISPLAY_LICENSE_LABELS,
-    has_dna_barcode_its,
+    dna_barcode_its_status,
     normalize_ancestry,
     upsert_inaturalist_images,
 )
@@ -255,6 +255,12 @@ def incremental_sync(
     complete = False
     taxon_conflicts: set[str] = set()
     metadata_conflicts: set[str] = set()
+    field_counts = {
+        "sequence": 0,
+        "observation_reference": 0,
+        "empty": 0,
+        "missing": 0,
+    }
     owns_client = client is None
     http = client or httpx.Client(timeout=60, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
@@ -338,7 +344,9 @@ def incremental_sync(
                 observation_uuid = str(observation.get("uuid") or "").strip()
                 if observation_uuid:
                     observation_ids.append(observation_uuid)
-                if not has_dna_barcode_its(observation):
+                field_status = dna_barcode_its_status(observation)
+                field_counts[field_status] += 1
+                if field_status not in {"sequence", "observation_reference"}:
                     continue
                 try:
                     ext_taxon = int((observation.get("taxon") or {}).get("id"))
@@ -391,6 +399,13 @@ def incremental_sync(
                 break
             if page_requests < max_requests:
                 time.sleep(request_interval)
+        logger.info(
+            "iNaturalist incremental ITS field values in this run: %d sequences, %d observation pointers, %d empty, %d missing",
+            field_counts["sequence"],
+            field_counts["observation_reference"],
+            field_counts["empty"],
+            field_counts["missing"],
+        )
         if not complete:
             partial_phase = "resume" if phase == "window" else phase
             next_cursor = json.dumps(
