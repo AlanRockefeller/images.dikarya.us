@@ -1,14 +1,16 @@
 <section id="gallery" class="gallery-region" aria-live="polite" aria-label="Image gallery" data-reorder-url="/taxon/{{ taxon.id }}/reorder" data-page="{{ page }}">
-  <form class="gallery-sort" method="get" action="{{ taxon_href }}" hx-get="{{ taxon_href }}" hx-select="#gallery" hx-target="#gallery" hx-swap="outerHTML" hx-push-url="true">
+  {% set gallery_sort = sort|default("community") %}
+  {% set gallery_taxon_href = taxon_href|default('/taxon/' ~ taxon.id) %}
+  <form class="gallery-sort" method="get" action="{{ gallery_taxon_href }}" hx-get="{{ gallery_taxon_href }}" hx-select="#gallery" hx-target="#gallery" hx-swap="outerHTML" hx-push-url="true">
     <label for="gallery-sort-select">Sort images</label>
     <select id="gallery-sort-select" name="sort">
-      <option value="community" {% if sort == "community" %}selected{% endif %}>Community ranking</option>
-      <option value="favorites" {% if sort == "favorites" %}selected{% endif %}>Most iNaturalist favorites</option>
+      <option value="community" {% if gallery_sort == "community" %}selected{% endif %}>Community ranking</option>
+      <option value="favorites" {% if gallery_sort == "favorites" %}selected{% endif %}>Most iNaturalist favorites</option>
     </select>
     <button type="submit">Apply</button>
-    {% if sort == "favorites" %}<span class="gallery-sort-note">Uses iNaturalist observation favorites, shared by that observation's photos. Counts come from synchronization; images without a count, including Mushroom Observer images, follow counted observations.</span>{% endif %}
+    {% if gallery_sort == "favorites" %}<span class="gallery-sort-note">Uses iNaturalist observation favorites, shared by that observation's photos. Counts come from synchronization; images without a count, including Mushroom Observer images, follow counted observations.</span>{% endif %}
   </form>
-  {% if user %}<form id="reorder-votes-form" hidden><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ sort }}"></form>{% endif %}
+  {% if user %}<form id="reorder-votes-form" hidden><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ gallery_sort }}"></form>{% endif %}
   {% if images %}
     <div class="gallery-grid">
       {% for row in images %}
@@ -21,7 +23,7 @@
               <form class="vote-form" method="post" action="/taxon/{{ taxon.id }}/image/{{ image.id }}/toggle" hx-post="/taxon/{{ taxon.id }}/image/{{ image.id }}/toggle" hx-target="#gallery" hx-swap="outerHTML">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
                 <input type="hidden" name="page" value="{{ page }}">
-                <input type="hidden" name="sort" value="{{ sort }}">
+                <input type="hidden" name="sort" value="{{ gallery_sort }}">
                 <button class="select-image" type="submit" aria-pressed="{{ 'true' if my_rank else 'false' }}" aria-label="{% if my_rank %}Remove rank {{ my_rank }} from{% else %}Select{% endif %} photograph by {{ image.photographer or 'unknown photographer' }}">
                   {% if my_rank %}<span class="rank-badge">{{ my_rank }}</span><span class="selected-label">Selected</span>{% else %}<span class="select-label">＋ Rank this image</span>{% endif %}
                 </button>
@@ -33,13 +35,13 @@
             <p class="license-line">{{ image.license or "License not listed" }}{% if image.attribution %}<span> · {{ image.attribution }}</span>{% endif %}</p>
             <p class="dna-evidence">DNA sequence evidence recorded for this observation</p>
             <a class="source-link" href="{{ image.source_page_url }}" target="_blank" rel="noopener noreferrer">View source record ↗</a>
-            {% if image.source_observation_favorites is not none %}<p class="source-favorites">{{ image.source_observation_favorites }} iNaturalist favorites on observation</p>{% endif %}
+            {% if image.source_observation_favorites is defined and image.source_observation_favorites is not none %}<p class="source-favorites">{{ image.source_observation_favorites }} iNaturalist favorites on observation</p>{% endif %}
             <div class="aggregate-line"><span>{{ rank_one }} first-place · {{ picked_by }} voters</span>{% if average_rank %}<span>avg. {{ "%.1f"|format(average_rank) }}</span>{% endif %}</div>
             {% if user and my_rank %}<div class="reorder-controls">
               <span>Your rank {{ my_rank }}</span>
               <button class="drag-handle" type="button" draggable="true" aria-label="Drag to reorder image rank {{ my_rank }}" title="Drag to reorder">⠿</button>
-              <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="up"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ sort }}"><button type="submit" aria-label="Move image up" {% if my_rank == 1 %}disabled{% endif %}>↑</button></form>
-              <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="down"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ sort }}"><button type="submit" aria-label="Move image down">↓</button></form>
+              <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="up"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ gallery_sort }}"><button type="submit" aria-label="Move image up" {% if my_rank == 1 %}disabled{% endif %}>↑</button></form>
+              <form method="post" action="/taxon/{{ taxon.id }}/move" hx-post="/taxon/{{ taxon.id }}/move" hx-target="#gallery" hx-swap="outerHTML"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="image_id" value="{{ image.id }}"><input type="hidden" name="direction" value="down"><input type="hidden" name="page" value="{{ page }}"><input type="hidden" name="sort" value="{{ gallery_sort }}"><button type="submit" aria-label="Move image down">↓</button></form>
             </div>{% endif %}
           </div>
         </article>
