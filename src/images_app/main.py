@@ -106,11 +106,31 @@ def gallery_page_url(taxon: Taxon, page: int, sort: str) -> str:
     return taxon_url(taxon) + (f"?{'&'.join(params)}" if params else "")
 
 
-def render_gallery(db: Session, request: Request, taxon: Taxon, user: User | None, page: int, sort: str):
-    return templates.TemplateResponse(request, "_gallery.html", gallery_context(db, request, taxon, user, page, sort))
+def render_gallery(
+    db: Session,
+    request: Request,
+    taxon: Taxon,
+    user: User | None,
+    page: int,
+    sort: str,
+    preserve_image_ids: list[int] | None = None,
+):
+    return templates.TemplateResponse(
+        request,
+        "_gallery.html",
+        gallery_context(db, request, taxon, user, page, sort, preserve_image_ids),
+    )
 
 
-def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | None, page: int, sort: str):
+def gallery_context(
+    db: Session,
+    request: Request,
+    taxon: Taxon,
+    user: User | None,
+    page: int,
+    sort: str,
+    preserve_image_ids: list[int] | None = None,
+):
     sort = normalize_gallery_sort(sort)
     page_size = 72
     total = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))) or 0
@@ -138,10 +158,20 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
         .outerjoin(my_vote, and_(my_vote.image_id == Image.id, my_vote.taxon_id == taxon.id, my_vote.user_id == (user.id if user else -1)))
         .where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))
         .group_by(Image.id, my_vote.rank)
-        .order_by(*ordering)
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     )
+    stable_order = None
+    if (
+        preserve_image_ids
+        and len(preserve_image_ids) <= page_size
+        and all(image_id > 0 for image_id in preserve_image_ids)
+        and len(preserve_image_ids) == len(set(preserve_image_ids))
+    ):
+        stable_order = preserve_image_ids
+        positions = {image_id: position for position, image_id in enumerate(stable_order)}
+        stmt = stmt.where(Image.id.in_(stable_order)).order_by(case(positions, value=Image.id, else_=len(positions)))
+    else:
+        stmt = stmt.order_by(*ordering).offset((page - 1) * page_size)
+    stmt = stmt.limit(page_size)
     images = db.execute(stmt).all()
     data = context(
         request,
@@ -359,6 +389,7 @@ def toggle_vote(
     image_id: int,
     page: int = Form(default=1),
     sort: str = Form(default="community"),
+    visible_image_ids: list[int] = Form(default=[]),
     csrf: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
@@ -384,7 +415,7 @@ def toggle_vote(
     page = max(1, page)
     sort = normalize_gallery_sort(sort)
     if request.headers.get("HX-Request") == "true":
-        return render_gallery(db, request, taxon, user, page, sort)
+        return render_gallery(db, request, taxon, user, page, sort, visible_image_ids)
     destination = gallery_page_url(taxon, page, sort)
     return RedirectResponse(destination, status_code=303)
 
