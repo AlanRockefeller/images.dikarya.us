@@ -118,6 +118,10 @@ class Image(Base):
     __table_args__ = (
         UniqueConstraint("source", "source_image_id", name="uq_images_source_image"),
         CheckConstraint("source IN ('inaturalist', 'mushroom_observer')", name="ck_images_source"),
+        CheckConstraint(
+            "source_observation_favorites IS NULL OR source_observation_favorites >= 0",
+            name="ck_images_source_observation_favorites_nonnegative",
+        ),
         Index("ix_images_taxon_active", "taxon_id", "active", "id"),
         Index("ix_images_source_observation", "source", "source_observation_id"),
     )
@@ -128,6 +132,7 @@ class Image(Base):
     source: Mapped[str] = mapped_column(String(40), nullable=False)
     source_image_id: Mapped[str] = mapped_column(String(100), nullable=False)
     source_observation_id: Mapped[str | None] = mapped_column(String(100))
+    source_observation_favorites: Mapped[int | None] = mapped_column(Integer)
     medium_url: Mapped[str] = mapped_column(Text, nullable=False)
     thumbnail_url: Mapped[str | None] = mapped_column(Text)
     source_page_url: Mapped[str] = mapped_column(Text, nullable=False)

@@ -185,6 +185,12 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
         observation_id = int(observation["id"])
     except (KeyError, ValueError, TypeError):
         return None
+    try:
+        observation_favorites = int(observation["faves_count"])
+        if observation_favorites < 0:
+            observation_favorites = None
+    except (KeyError, ValueError, TypeError):
+        observation_favorites = None
     photo_user = photo.get("user") or {}
     observer = photo_user.get("name") or photo_user.get("login")
     if not observer:
@@ -209,6 +215,7 @@ def _make_image(photo: dict, observation: dict, taxon_id: int, seen_at: datetime
         "source": "inaturalist",
         "source_image_id": str(photo_id),
         "source_observation_id": str(observation.get("uuid") or observation_id),
+        "source_observation_favorites": observation_favorites,
         "medium_url": urls[0],
         "thumbnail_url": urls[1],
         "source_page_url": f"https://www.inaturalist.org/observations/{observation_id}",

@@ -237,7 +237,7 @@ def upsert_inaturalist_images(
             Image,
             to_upsert,
             ["source", "source_image_id"],
-            ["taxon_id", "source_observation_id", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "dna_verified", "active", "source_last_seen_at", "updated_at"],
+            ["taxon_id", "source_observation_id", "source_observation_favorites", "medium_url", "thumbnail_url", "source_page_url", "photographer", "license", "attribution", "display_eligible", "dna_verified", "active", "source_last_seen_at", "updated_at"],
         )
     return len(items), touched_taxa
 

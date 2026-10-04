@@ -93,15 +93,25 @@ def fungi_filter():
     return or_(Taxon.inat_taxon_id == settings.fungi_taxon_id, Taxon.ancestry.like(f"%/{root}/%"))
 
 
-def page_url(taxon: Taxon, page: int) -> str:
-    return f"{taxon_url(taxon)}?page={page}"
+def normalize_gallery_sort(value: str | None) -> str:
+    return value if value in {"community", "favorites"} else "community"
 
 
-def render_gallery(db: Session, request: Request, taxon: Taxon, user: User | None, page: int):
-    return templates.TemplateResponse(request, "_gallery.html", gallery_context(db, request, taxon, user, page))
+def gallery_page_url(taxon: Taxon, page: int, sort: str) -> str:
+    params = []
+    if page > 1:
+        params.append(f"page={page}")
+    if sort != "community":
+        params.append(f"sort={sort}")
+    return taxon_url(taxon) + (f"?{'&'.join(params)}" if params else "")
 
 
-def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | None, page: int):
+def render_gallery(db: Session, request: Request, taxon: Taxon, user: User | None, page: int, sort: str):
+    return templates.TemplateResponse(request, "_gallery.html", gallery_context(db, request, taxon, user, page, sort))
+
+
+def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | None, page: int, sort: str):
+    sort = normalize_gallery_sort(sort)
     page_size = 72
     total = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))) or 0
     vote = aliased(Vote)
@@ -110,19 +120,25 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
     picked_by = func.count(vote.id)
     average_rank = func.avg(vote.rank)
     my_rank = my_vote.rank.label("my_rank")
+    ordering = [
+        case((my_vote.rank.is_not(None), 0), else_=1),
+        my_vote.rank.asc(),
+        rank_one.desc(),
+        picked_by.desc(),
+        Image.id.asc(),
+    ]
+    if sort == "favorites":
+        ordering = [
+            Image.source_observation_favorites.desc().nullslast(),
+            *ordering,
+        ]
     stmt = (
         select(Image, picked_by.label("picked_by"), rank_one.label("rank_one"), average_rank.label("average_rank"), my_rank)
         .outerjoin(vote, and_(vote.image_id == Image.id, vote.taxon_id == taxon.id))
         .outerjoin(my_vote, and_(my_vote.image_id == Image.id, my_vote.taxon_id == taxon.id, my_vote.user_id == (user.id if user else -1)))
         .where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))
         .group_by(Image.id, my_vote.rank)
-        .order_by(
-            case((my_vote.rank.is_not(None), 0), else_=1),
-            my_vote.rank.asc(),
-            rank_one.desc(),
-            picked_by.desc(),
-            Image.id.asc(),
-        )
+        .order_by(*ordering)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -131,12 +147,14 @@ def gallery_context(db: Session, request: Request, taxon: Taxon, user: User | No
         request,
         db,
         taxon=taxon,
+        taxon_href=taxon_url(taxon),
         images=images,
         page=page,
+        sort=sort,
         page_count=max(1, (total + page_size - 1) // page_size),
         total_images=total,
-        previous_url=page_url(taxon, page - 1) if page > 1 else None,
-        next_url=page_url(taxon, page + 1) if page * page_size < total else None,
+        previous_url=gallery_page_url(taxon, page - 1, sort) if page > 1 else None,
+        next_url=gallery_page_url(taxon, page + 1, sort) if page * page_size < total else None,
     )
     return data
 
@@ -226,15 +244,16 @@ def directory(
 
 @app.get("/taxon/{taxon_id}/{slug}", response_class=HTMLResponse)
 @app.get("/taxon/{taxon_id}", response_class=HTMLResponse)
-def taxon_page(request: Request, taxon_id: int, slug: str = "", page: int = 1, db: Session = Depends(get_db)):
+def taxon_page(request: Request, taxon_id: int, slug: str = "", page: int = 1, sort: str = "community", db: Session = Depends(get_db)):
     taxon = db.get(Taxon, taxon_id)
     if not taxon or not taxon.active:
         raise HTTPException(404, "Taxon not found")
+    sort = normalize_gallery_sort(sort)
     if slug == "gallery":
-        return render_gallery(db, request, taxon, session_user(request, db), max(1, page))
+        return render_gallery(db, request, taxon, session_user(request, db), max(1, page), sort)
     canonical = taxon_url(taxon)
     if request.url.path != canonical:
-        return RedirectResponse(f"{canonical}?page={max(1, page)}" if page > 1 else canonical, status_code=308)
+        return RedirectResponse(gallery_page_url(taxon, max(1, page), sort), status_code=308)
     page = max(1, page)
     ancestors: list[Taxon] = []
     for token in (taxon.ancestry or "").split("/"):
@@ -247,7 +266,7 @@ def taxon_page(request: Request, taxon_id: int, slug: str = "", page: int = 1, d
     voted_users = db.scalar(select(func.count(func.distinct(Vote.user_id))).where(Vote.taxon_id == taxon.id)) or 0
     total_images = db.scalar(select(func.count(Image.id)).where(Image.taxon_id == taxon.id, Image.active.is_(True), Image.display_eligible.is_(True), Image.dna_verified.is_(True))) or 0
     page = max(1, page)
-    data = gallery_context(db, request, taxon, session_user(request, db), page)
+    data = gallery_context(db, request, taxon, session_user(request, db), page, sort)
     data.update({"ancestors": ancestors, "voted_users": voted_users, "total_images": total_images})
     return templates.TemplateResponse(
         request,
@@ -257,11 +276,11 @@ def taxon_page(request: Request, taxon_id: int, slug: str = "", page: int = 1, d
 
 
 @app.get("/taxon/{taxon_id}/gallery", response_class=HTMLResponse)
-def gallery(request: Request, taxon_id: int, page: int = 1, db: Session = Depends(get_db)):
+def gallery(request: Request, taxon_id: int, page: int = 1, sort: str = "community", db: Session = Depends(get_db)):
     taxon = db.get(Taxon, taxon_id)
     if not taxon or not taxon.active:
         raise HTTPException(404, "Taxon not found")
-    return render_gallery(db, request, taxon, session_user(request, db), max(1, page))
+    return render_gallery(db, request, taxon, session_user(request, db), max(1, page), normalize_gallery_sort(sort))
 
 
 @app.get("/register", response_class=HTMLResponse)
@@ -339,6 +358,7 @@ def toggle_vote(
     taxon_id: int,
     image_id: int,
     page: int = Form(default=1),
+    sort: str = Form(default="community"),
     csrf: str | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
@@ -362,9 +382,10 @@ def toggle_vote(
         db.add(Vote(user_id=user.id, taxon_id=taxon.id, image_id=image.id, rank=len(votes) + 1))
     db.commit()
     page = max(1, page)
+    sort = normalize_gallery_sort(sort)
     if request.headers.get("HX-Request") == "true":
-        return render_gallery(db, request, taxon, user, page)
-    destination = taxon_url(taxon) + (f"?page={page}" if page > 1 else "")
+        return render_gallery(db, request, taxon, user, page, sort)
+    destination = gallery_page_url(taxon, page, sort)
     return RedirectResponse(destination, status_code=303)
 
 
@@ -375,6 +396,7 @@ def move_vote(
     image_id: int = Form(),
     direction: str = Form(pattern="^(up|down)$"),
     page: int = Form(default=1),
+    sort: str = Form(default="community"),
     csrf: str = Form(),
     db: Session = Depends(get_db),
 ):
@@ -393,9 +415,10 @@ def move_vote(
             _persist_vote_order(db, votes)
     db.commit()
     page = max(1, page)
+    sort = normalize_gallery_sort(sort)
     if request.headers.get("HX-Request") == "true":
-        return render_gallery(db, request, taxon, user, page)
-    destination = taxon_url(taxon) + (f"?page={page}" if page > 1 else "")
+        return render_gallery(db, request, taxon, user, page, sort)
+    destination = gallery_page_url(taxon, page, sort)
     return RedirectResponse(destination, status_code=303)
 
 
@@ -405,6 +428,7 @@ def reorder_votes(
     taxon_id: int,
     image_ids: list[int] = Form(),
     page: int = Form(default=1),
+    sort: str = Form(default="community"),
     csrf: str = Form(),
     db: Session = Depends(get_db),
 ):
@@ -434,9 +458,10 @@ def reorder_votes(
     _persist_vote_order(db, votes)
     db.commit()
     page = max(1, page)
+    sort = normalize_gallery_sort(sort)
     if request.headers.get("HX-Request") == "true":
-        return render_gallery(db, request, taxon, user, page)
-    return RedirectResponse(taxon_url(taxon) + (f"?page={page}" if page > 1 else ""), status_code=303)
+        return render_gallery(db, request, taxon, user, page, sort)
+    return RedirectResponse(gallery_page_url(taxon, page, sort), status_code=303)
 
 
 def _persist_vote_order(db: Session, votes: list[Vote]) -> None:
