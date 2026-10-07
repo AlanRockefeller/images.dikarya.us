@@ -34,7 +34,7 @@
               {{ taxon_name(candidate) }} <small class="muted">{{ candidate.rank }} · iNat {{ candidate.inat_taxon_id }}</small></label>
           {% else %}
             <input class="map-form__picker" name="inat_taxon_id" inputmode="numeric" pattern="[0-9]+" required
-                   placeholder="iNat taxon ID or search a name" data-typeahead="pick" aria-label="iNaturalist taxon for {{ name.name }}">
+                   placeholder="Taxon name or iNat ID" data-typeahead="pick" aria-label="iNaturalist taxon for {{ name.name }}">
           {% endfor %}
           <button class="button button--small" type="submit">Map</button>
         </form>
