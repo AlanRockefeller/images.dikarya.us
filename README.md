@@ -111,10 +111,10 @@ The server layout (already in place) is:
 ### Deploying an update
 
 ```sh
-cd /var/www/images.dikarya.us/app && git pull
-sudo systemctl restart images.service          # runs migrations first, then starts the app
-journalctl -u images-migrate.service -u images.service -n 50
+cd /var/www/images.dikarya.us/app && git pull --ff-only && scripts/deploy.sh
 ```
+
+`scripts/deploy.sh` resets ownership to `<owner>:images` and permissions to group-read-only. New files would otherwise get the owner's group and be unreadable by the service. It then restarts `images.service`, which runs migrations first, and waits for `/healthz`. If something fails: `journalctl -u images-migrate.service -u images.service -n 80`.
 
 If unit files in `deploy/` changed, copy them to `/etc/systemd/system/` (back up the old ones first) and run `sudo systemctl daemon-reload`. If nginx config changes, back up the current vhost, install the new one, run `sudo nginx -t`, then `sudo systemctl reload nginx`.
 
