@@ -42,7 +42,10 @@ MIN_INTERVAL = 5.0
 OBSERVATIONS_PER_REQUEST = 100
 _INAT_OBSERVATION = re.compile(r"inaturalist\.org/observations/(\d+)")
 _RANK_CONNECTORS = re.compile(r"\s+(?:var|subsp|ssp|f|forma|subvar)\.\s+", re.IGNORECASE)
-_UNMAPPABLE = re.compile(r"\b(?:group|sensu|s\.\s?l\.|s\.\s?s\.|cf\.|aff\.|nom\. prov\.)|['\"]", re.IGNORECASE)
+# Names whose meaning differs between sites; these always need a human.
+# (Provisional names such as "Russula sp. 'IN1'" are fine: iNat has many of
+# them too, and only an exact match is accepted.)
+_UNMAPPABLE = re.compile(r"\b(?:group|sensu|s\.\s?l\.|s\.\s?s\.|cf\.|aff\.)", re.IGNORECASE)
 
 
 def make_client(max_requests: int | None = None, **kwargs) -> PoliteClient:
@@ -231,7 +234,7 @@ def _key(name: str) -> str:
 def resolve(name: str, rank: str | None, synonyms: list[str], db: Session) -> tuple[str, str | None, list[int], str | None]:
     """Decide how an MO name maps to iNat taxa: (status, method, candidate taxon IDs, note)."""
     if _UNMAPPABLE.search(name):
-        return "unresolved", None, [], "MO name is a group, sensu or provisional name"
+        return "unresolved", None, [], "MO group, sensu, cf. or aff. name"
 
     def exact(text_name: str) -> list[Taxon]:
         return list(

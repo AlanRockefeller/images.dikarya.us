@@ -18,6 +18,7 @@ NAMES_CSV = "\n".join(
         "4\tAmanita muscaria var. guessowii\tVeselý\t0\tNULL\tNULL\t4",
         "5\tAmbigua\t\t0\tNULL\tNULL\t9",
         "6\tBoletus mysterius\t\t0\tNULL\tNULL\t4",
+        "7\tMycena sp. 'IN10'\t\t0\tNULL\tNULL\t4",
     ]
 )
 
@@ -44,6 +45,7 @@ OBSERVATIONS = {
     105: mo_observation(105, 5, "Ambigua", rank="genus"),
     106: mo_observation(106, 1, "Amanita muscaria", links=["https://www.inaturalist.org/observations/777"]),
     107: mo_observation(107, 6, "Boletus mysterius"),
+    110: mo_observation(110, 7, "Mycena sp. 'IN10'"),
 }
 # MO lets one image belong to several observations.
 OBSERVATIONS[100]["images"].append(dict(OBSERVATIONS[101]["images"][0]))
@@ -58,6 +60,7 @@ SEQUENCES = [
     {"id": 8, "observation_id": 107, "locus": "ITS", "bases": BASES, "accession": ""},
     {"id": 9, "observation_id": 108, "locus": "nrLSU", "bases": BASES, "accession": ""},
     {"id": 10, "observation_id": 109, "locus": "ITS", "bases": "pending", "accession": ""},
+    {"id": 11, "observation_id": 110, "locus": "ITS", "bases": BASES, "accession": ""},
 ]
 
 
@@ -90,9 +93,10 @@ def taxa(make):
     guessowii = make.taxon(321524, "Amanita muscaria guessowii", "variety", parent=muscaria)
     make.taxon(1, "Ambigua", "genus")
     make.taxon(2, "Ambigua", "genus")
+    provisional = make.taxon(1234567, "Mycena sp. 'IN10'")
     inat_copy = make.taxon(48702, "Amanita phalloides", parent=amanita)
     make.image(inat_copy, observation=777)
-    return {"muscaria": muscaria, "guessowii": guessowii}
+    return {"muscaria": muscaria, "guessowii": guessowii, "provisional": provisional}
 
 
 def state(db):
@@ -114,6 +118,7 @@ def test_mo_sync_maps_names_and_filters_photos(db, taxa):
         "105": (False, "unmapped_name", None),  # two iNat taxa share the name
         "106": (False, "duplicate", muscaria),  # same observation already imported from iNat
         "107": (False, "unmapped_name", None),  # no such iNat taxon
+        "110": (True, None, taxa["provisional"].id),  # provisional names match exactly
     }
     names = {n.name: (n.status, n.method) for n in db.scalars(select(SourceName)).all()}
     assert names["Agaricus muscarius"] == ("mapped", "synonym")
