@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Admin · {{ site_name }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>Admin</h1>
+  <p><a href="/admin/names">Mushroom Observer name mapping</a> ({{ name_status.get('unresolved', 0)|number }} unresolved, {{ name_status.get('ambiguous', 0)|number }} ambiguous)</p>
+</header>
+
+<dl class="metrics">
+  {% for label, value in counts.items() %}<div><dt>{{ label }}</dt><dd>{{ value|number }}</dd></div>{% endfor %}
+</dl>
+
+<section class="section">
+  <header class="section__head"><h2>Synchronization</h2></header>
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>Job</th><th>Status</th><th>Last started</th><th>Last success</th><th>Records</th><th>Error</th></tr></thead>
+    <tbody>
+      {% for state in states %}
+      <tr>
+        <td>{{ state.job }}</td>
+        <td><span class="status status--{{ state.last_status }}">{{ state.last_status }}</span></td>
+        <td>{{ state.last_started_at.strftime('%Y-%m-%d %H:%M UTC') if state.last_started_at else '—' }}</td>
+        <td>{{ state.last_success_at.strftime('%Y-%m-%d %H:%M UTC') if state.last_success_at else 'never' }}</td>
+        <td>{{ state.records_processed|number }}</td>
+        <td class="data__error">{{ state.last_error or '' }}</td>
+      </tr>
+      {% else %}<tr><td colspan="6">No imports have run yet. See the README for the first import.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="section">
+  <header class="section__head"><h2>Recent runs</h2></header>
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>Job</th><th>Started</th><th>Duration</th><th>Status</th><th>Details</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.job }}</td>
+        <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td>{% if run.finished_at %}{{ ((run.finished_at - run.started_at).total_seconds() / 60)|round(1) }} min{% else %}running{% endif %}</td>
+        <td><span class="status status--{{ run.status }}">{{ run.status }}</span></td>
+        <td class="data__stats">{% for key, value in run.stats.items() %}<span>{{ key|replace('_', ' ') }}: {{ value|number if value is number else value }}</span>{% endfor %}{% if run.error %}<span class="data__error">{{ run.error }}</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+{% if hidden %}
+<section class="section">
+  <header class="section__head"><h2>Hidden photos by reason</h2></header>
+  <p class="muted">Hidden photos keep their metadata (and any votes) but are not shown. <code>license</code>: not an allowed license. <code>no_its</code>: the ITS field has no sequence. <code>unmapped_name</code>: MO name awaiting mapping. <code>missing_upstream</code>: gone from the source or no longer qualifies. <code>duplicate</code>: MO copy of an iNaturalist observation.</p>
+  <table class="data data--compact">
+    <thead><tr><th>Source</th><th>Reason</th><th>Photos</th></tr></thead>
+    <tbody>{% for source, reason, count in hidden %}<tr><td>{{ source_label(source) }}</td><td><code>{{ reason }}</code></td><td>{{ count|number }}</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

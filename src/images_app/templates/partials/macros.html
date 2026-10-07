@@ -1,0 +1,35 @@
+{% macro taxon_card(taxon, show_rank=False) -%}
+<a class="taxon-card" href="{{ taxon_url(taxon) }}">
+  <span class="taxon-card__media">
+    {% if taxon.cover_image %}
+      <img src="{{ taxon.cover_image.thumb_url }}" alt="" loading="lazy" decoding="async">
+    {% endif %}
+  </span>
+  <span class="taxon-card__body">
+    <span class="taxon-card__name">{{ taxon_name(taxon) }}</span>
+    {% if taxon.common_name %}<span class="taxon-card__common">{{ taxon.common_name }}</span>{% endif %}
+    <span class="taxon-card__meta">{% if show_rank %}{{ taxon.rank|capitalize }} · {% endif %}{{ taxon.subtree_image_count|plural('photo') }}</span>
+  </span>
+</a>
+{%- endmacro %}
+
+{% macro breadcrumbs(lineage) -%}
+{% if lineage %}
+<nav class="breadcrumbs" aria-label="Classification">
+  <ol>
+    {% for t in lineage %}<li><a href="{{ taxon_url(t) }}" title="{{ t.rank|capitalize }}">{{ taxon_name(t) }}</a></li>{% endfor %}
+  </ol>
+</nav>
+{% endif %}
+{%- endmacro %}
+
+{# `base` is a URL ending in "?" or "&", to which page=N is appended. #}
+{% macro pager(page, pages, base) -%}
+{% if pages > 1 %}
+<nav class="pager" aria-label="Pages">
+  {% if page > 1 %}<a class="button button--ghost" href="{{ base }}page={{ page - 1 }}" rel="prev">← Previous</a>{% else %}<span></span>{% endif %}
+  <span class="pager__status">Page {{ page }} of {{ pages|number }}</span>
+  {% if page < pages %}<a class="button button--ghost" href="{{ base }}page={{ page + 1 }}" rel="next">Next →</a>{% else %}<span></span>{% endif %}
+</nav>
+{% endif %}
+{%- endmacro %}

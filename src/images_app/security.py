@@ -1,87 +1,99 @@
+"""Passwords, server-side sessions, CSRF tokens and rate limiting."""
+
 from __future__ import annotations
 
 import hashlib
 import hmac
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from argon2 import PasswordHasher
-from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import HTTPException, Request
+from argon2.exceptions import InvalidHashError, VerificationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from images_app.models import RateLimitEvent, User, utcnow
+from images_app.config import settings
+from images_app.models import RateLimitHit, User, UserSession
 
-password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
+SESSION_LIFETIME = timedelta(days=30)
+SESSION_TOUCH_INTERVAL = timedelta(hours=1)
+# __Host- cookies cannot be set by sibling subdomains and require HTTPS.
+SESSION_COOKIE = "__Host-session" if settings.production else "session"
+CSRF_COOKIE = "__Host-csrf" if settings.production else "csrf"
+
+_hasher = PasswordHasher()  # argon2id with library defaults
+# A real hash to verify against when the email is unknown, so timing is similar.
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))
 
 
 def hash_password(password: str) -> str:
-    return password_hasher.hash(password)
+    return _hasher.hash(password)
 
 
-def verify_password(password_hash: str, password: str) -> bool:
+def verify_password(password_hash: str | None, password: str) -> bool:
     try:
-        return password_hasher.verify(password_hash, password)
-    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return _hasher.verify(password_hash or _DUMMY_HASH, password) and password_hash is not None
+    except (VerificationError, InvalidHashError):
         return False
 
 
-def session_user(request: Request, db: Session) -> User | None:
-    user_id = request.session.get("user_id")
-    if not isinstance(user_id, int):
-        return None
-    user = db.get(User, user_id)
-    return user if user and user.is_active else None
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def csrf_token(request: Request) -> str:
-    token = request.session.get("csrf_token")
-    if not isinstance(token, str):
-        token = secrets.token_urlsafe(32)
-        request.session["csrf_token"] = token
+def _token_hash(token: str) -> bytes:
+    return hashlib.sha256(token.encode()).digest()
+
+
+def create_session(db: Session, user: User) -> str:
+    token = secrets.token_urlsafe(32)
+    db.add(UserSession(token_hash=_token_hash(token), user_id=user.id, expires_at=_now() + SESSION_LIFETIME))
+    db.execute(delete(UserSession).where(UserSession.expires_at < _now()))
     return token
 
 
-def require_csrf(request: Request, submitted: str | None) -> None:
-    expected = request.session.get("csrf_token")
-    provided = submitted or request.headers.get("x-csrftoken")
-    if not isinstance(expected, str) or not isinstance(provided, str) or not hmac.compare_digest(expected, provided):
-        raise HTTPException(status_code=403, detail="The form expired. Reload the page and try again.")
-
-
-def _key_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()
-
-
-def enforce_rate_limit(db: Session, scope: str, key: str, maximum: int, seconds: int) -> None:
-    now = utcnow()
-    floor = now - timedelta(seconds=seconds)
-    hashed = _key_hash(key)
-    db.execute(delete(RateLimitEvent).where(RateLimitEvent.occurred_at < now - timedelta(days=1)))
-    count = db.scalar(
-        select(func.count(RateLimitEvent.id)).where(
-            RateLimitEvent.scope == scope,
-            RateLimitEvent.key_hash == hashed,
-            RateLimitEvent.occurred_at >= floor,
-        )
-    ) or 0
-    if count >= maximum:
+def load_session_user(db: Session, token: str | None) -> User | None:
+    if not token or len(token) > 100:
+        return None
+    session = db.get(UserSession, _token_hash(token))
+    now = _now()
+    if session is None or session.expires_at < now or not session.user.is_active:
+        return None
+    if now - session.last_seen_at > SESSION_TOUCH_INTERVAL:
+        session.last_seen_at = now
+        session.expires_at = now + SESSION_LIFETIME
         db.commit()
-        raise HTTPException(status_code=429, detail="Too many attempts. Please wait and try again.")
-    db.add(RateLimitEvent(scope=scope, key_hash=hashed, occurred_at=now))
+    return session.user
+
+
+def end_session(db: Session, token: str | None) -> None:
+    if token:
+        db.execute(delete(UserSession).where(UserSession.token_hash == _token_hash(token)))
+        db.commit()
+
+
+def new_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def csrf_matches(cookie_token: str | None, submitted: str | None) -> bool:
+    return bool(cookie_token and submitted) and hmac.compare_digest(cookie_token, submitted)
+
+
+def rate_limited(db: Session, bucket: str, key: str, limit: int, window: timedelta) -> bool:
+    """Record an attempt and report whether the caller exceeded `limit` within `window`."""
+    key_hash = hmac.new(settings.secret_key.encode(), key.encode(), hashlib.sha256).digest()
+    now = _now()
+    db.execute(delete(RateLimitHit).where(RateLimitHit.occurred_at < now - timedelta(days=1)))
+    recent = db.scalar(
+        select(func.count())
+        .select_from(RateLimitHit)
+        .where(
+            RateLimitHit.bucket == bucket,
+            RateLimitHit.key_hash == key_hash,
+            RateLimitHit.occurred_at > now - window,
+        )
+    )
+    db.add(RateLimitHit(bucket=bucket, key_hash=key_hash, occurred_at=now))
     db.commit()
-
-
-def require_user(request: Request, db: Session) -> User:
-    user = session_user(request, db)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Please log in to rank images.")
-    return user
-
-
-def require_admin(request: Request, db: Session) -> User:
-    user = require_user(request, db)
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail="Administrator access is required.")
-    return user
+    return recent >= limit

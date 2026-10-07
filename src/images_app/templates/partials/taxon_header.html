@@ -1,0 +1,19 @@
+{% from "partials/macros.html" import breadcrumbs %}
+<header class="taxon-head">
+  {{ breadcrumbs(lineage) }}
+  <div class="taxon-head__title">
+    <h1>{{ taxon_name(taxon) }}</h1>
+    <p class="taxon-head__sub">
+      {% if taxon.common_name %}<span class="taxon-head__common">{{ taxon.common_name }}</span>{% endif %}
+      <span class="taxon-head__rank">{{ taxon.rank|capitalize }}</span>
+      <a class="external" href="https://www.inaturalist.org/taxa/{{ taxon.inat_taxon_id }}" rel="noopener">iNaturalist ↗</a>
+    </p>
+  </div>
+  <div class="taxon-head__bar">
+    <nav class="tabs" aria-label="Views">
+      {% set results_url = taxon_url(taxon, '/results') %}
+      <a href="{{ taxon_url(taxon) }}"{% if not request.url.path.endswith('/results') %} aria-current="page"{% endif %}>Photos <span>{{ (taxon.subtree_image_count if taxon.rank_level <= 20 else taxon.image_count)|number }}</span></a>
+      <a href="{{ results_url }}"{% if request.url.path.endswith('/results') %} aria-current="page"{% endif %}>Community results <span>{{ rankers|number }}</span></a>
+    </nav>
+  </div>
+</header>

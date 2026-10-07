@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}“{{ q }}” · {% endif %}Search · {{ site_name }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>{% if q %}Results for “{{ q }}”{% else %}Search{% endif %}</h1>
+  {% if q %}<p>{{ results|length|plural('match', 'matches') }} among scientific names, synonyms and common names.</p>{% endif %}
+</header>
+{% if results %}
+<ul class="result-list">
+  {% for taxon, matched in results %}
+  <li>
+    <a class="result" href="{{ taxon_url(taxon) }}">
+      <span class="result__thumb">{% if taxon.cover_image %}<img src="{{ taxon.cover_image.thumb_url }}" alt="" loading="lazy">{% endif %}</span>
+      <span class="result__body">
+        <span class="result__name">{{ taxon_name(taxon) }}</span>
+        <span class="result__meta">{{ taxon.rank|capitalize }}{% if taxon.common_name %} · {{ taxon.common_name }}{% endif %}{% if matched %} · matched “{{ matched }}”{% endif %}</span>
+      </span>
+      <span class="result__count">{{ taxon.subtree_image_count|plural('photo') }}</span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% elif q %}
+<section class="empty"><h2>No matches</h2><p>Check the spelling, or try the genus alone. Only taxa with ITS-barcoded photos are listed.</p></section>
+{% endif %}
+{% endblock %}

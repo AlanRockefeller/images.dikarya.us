@@ -1,0 +1,35 @@
+{% for image in listing.images %}
+{% set rank = ranks.get(image.id) %}
+{% set inat = image.source == 'inaturalist' %}
+<li class="tile{% if rank %} is-ranked{% endif %}" id="photo-{{ image.id }}" style="--ar:{{ image.aspect_ratio }}"
+    data-id="{{ image.id }}" data-thumb="{{ image.thumb_url }}" data-large="{{ image.large_url }}"
+    data-credit="{{ image.photographer }}" data-license="{{ license_label(image.license_code) }}"
+    data-license-url="{{ license_url(image.license_code) or '' }}" data-source="{{ source_label(image.source) }}"
+    data-obs="{{ image.observation_url }}" data-observed="{{ image.observed_on or '' }}"
+    data-faves="{{ image.faves if inat else '' }}" data-its="{{ image.its_length or '' }}"
+    data-taxon="{{ plain_name(image.taxon) if image.taxon_id != taxon.id and image.taxon else '' }}">
+  <img src="{{ image.medium_url }}"
+       srcset="{{ image.thumb_url }} {{ 240 if inat else 320 }}w, {{ image.medium_url }} {{ 500 if inat else 640 }}w"
+       sizes="(max-width: 600px) 50vw, 360px" alt="{{ image_alt(image, taxon) }}" loading="lazy" decoding="async"
+       {% if image.width %}width="{{ image.width }}" height="{{ image.height }}"{% endif %}>
+  {% if user %}
+  <button class="tile__select" type="submit" form="toggle-form" name="image_id" value="{{ image.id }}" aria-pressed="{{ 'true' if rank else 'false' }}">
+    <span class="visually-hidden">{% if rank %}Ranked {{ rank }}. Remove from{% else %}Add to{% endif %} your ranking</span>
+  </button>
+  {% else %}
+  <a class="tile__select" href="{{ image.observation_url }}" rel="noopener"><span class="visually-hidden">View photo</span></a>
+  {% endif %}
+  <span class="tile__rank" aria-hidden="true">{{ rank or '' }}</span>
+  <button class="tile__zoom" type="button" aria-label="View larger with details">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8V3h5M17 12v5h-5M3 3l5.5 5.5M17 17l-5.5-5.5"/></svg>
+  </button>
+  {% if image.taxon_id != taxon.id and image.taxon %}<span class="tile__taxon">{{ taxon_name(image.taxon) }}</span>{% endif %}
+  <p class="tile__credit"><span class="tile__who">{{ image.photographer }}</span><span>{{ license_label(image.license_code) }}</span><span>{{ source_short(image.source) }}</span></p>
+</li>
+{% endfor %}
+{% if listing.has_more %}
+{% set query = 'sort=' ~ sort ~ '&source=' ~ source ~ ('&only=1' if only else '') ~ '&page=' ~ (listing.page + 1) %}
+<li class="gallery__more" data-next="{{ taxon_url(taxon, '/photos') }}?{{ query }}">
+  <a class="button button--ghost" href="{{ taxon_url(taxon) }}?{{ query }}">Show more photos</a>
+</li>
+{% endif %}

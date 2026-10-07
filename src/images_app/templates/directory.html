@@ -1,45 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Browse fungi · Dikarya Images{% endblock %}
+{% from "partials/macros.html" import taxon_card, pager %}
+{% block title %}{% if within %}Within {{ plain_name(within) }}{% else %}Browse fungi{% endif %} · {{ site_name }}{% endblock %}
 {% block content %}
-<section class="page-heading">
-  <p class="eyebrow">Fungi</p>
-  <h1>Browse taxa</h1>
-  <p>Browse species by default, or choose another taxonomic rank. Search accepted names and aliases.</p>
-  <form class="search-box search-box-small" action="/taxa" method="get" role="search">
-    <label class="sr-only" for="taxon-search">Search scientific names and synonyms</label>
-    <input id="taxon-search" name="q" type="search" value="{{ q }}" placeholder="Scientific name or synonym">
-    <label class="sr-only" for="taxon-rank">Taxonomic rank</label>
-    <select id="taxon-rank" name="rank">
-      <option value="species" {% if rank == "species" %}selected{% endif %}>Species</option>
-      <option value="all" {% if rank == "all" %}selected{% endif %}>All ranks</option>
-      {% for available_rank in available_ranks %}
-        {% if available_rank not in ["species"] %}<option value="{{ available_rank }}" {% if rank == available_rank %}selected{% endif %}>{{ available_rank|capitalize }}</option>{% endif %}
-      {% endfor %}
-    </select>
-    <button type="submit">Search</button>
-  </form>
-  <nav class="alphabet" aria-label="Browse by first letter">
-    {% for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" %}<a {% if letter == ch %}aria-current="page"{% endif %} href="/taxa?rank={{ rank }}&letter={{ ch }}">{{ ch }}</a>{% endfor %}
-  </nav>
-</section>
-<section class="section-block directory-block">
-  <div class="section-heading"><h2>{% if q %}Matches for “{{ q }}”{% elif letter %}Names beginning with {{ letter }}{% elif rank == "species" %}Species with images{% else %}Taxa with images{% endif %}</h2><span>{{ total }} results</span></div>
-  {% if taxa %}
-    <div class="taxon-list">
-      {% for taxon in taxa %}
-        <a class="taxon-row" href="/taxon/{{ taxon.id }}">
-          <span><strong>{{ taxon.scientific_name }}</strong><small>{{ taxon.rank or "Taxon" }}</small></span>
-          <span class="image-count">{{ taxon.image_count }} images <span aria-hidden="true">→</span></span>
-        </a>
-      {% endfor %}
-    </div>
-    {% if page_count > 1 %}<nav class="pagination" aria-label="Directory pages">
-      {% if page > 1 %}<a href="/taxa?q={{ q|urlencode }}&letter={{ letter }}&rank={{ rank }}&page={{ page - 1 }}">← Previous</a>{% endif %}
-      <span>Page {{ page }} of {{ page_count }}</span>
-      {% if page < page_count %}<a href="/taxa?q={{ q|urlencode }}&letter={{ letter }}&rank={{ rank }}&page={{ page + 1 }}">Next →</a>{% endif %}
-    </nav>{% endif %}
-  {% else %}
-    <div class="empty-state"><h3>No taxa found</h3><p>Try another spelling or a shorter search.</p></div>
-  {% endif %}
-</section>
+<header class="page-head">
+  <h1>{% if within %}Within {{ taxon_name(within) }}{% else %}Browse fungi{% endif %}</h1>
+  <p>{{ listing.total|number }} {{ ranks[rank][0]|lower if rank != 'all' else 'taxa' }} with ITS-barcoded photos{% if letter %}, starting with “{{ letter }}”{% endif %}.
+    {% if within %}<a href="{{ taxon_url(within) }}">Back to {{ plain_name(within) }}</a>{% endif %}</p>
+</header>
+
+<form class="toolbar toolbar--directory" method="get" action="/taxa" data-autosubmit>
+  {% if within %}<input type="hidden" name="within" value="{{ within.inat_taxon_id }}">{% endif %}
+  {% if letter %}<input type="hidden" name="letter" value="{{ letter }}">{% endif %}
+  <label>Show
+    <select name="rank">{% for key, value in ranks.items() %}<option value="{{ key }}"{% if key == rank %} selected{% endif %}>{{ value[0] }}</option>{% endfor %}</select>
+  </label>
+  <label>Sort
+    <select name="sort">{% for key, label in sorts.items() %}<option value="{{ key }}"{% if key == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  </label>
+  <noscript><button class="button button--small" type="submit">Apply</button></noscript>
+</form>
+
+{% set base = '/taxa?rank=' ~ rank ~ '&sort=' ~ sort ~ ('&within=' ~ within.inat_taxon_id if within else '') %}
+<nav class="letters" aria-label="First letter">
+  <a href="{{ base }}"{% if not letter %} aria-current="page"{% endif %}>All</a>
+  {% for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" %}<a href="{{ base }}&amp;letter={{ ch }}"{% if letter == ch %} aria-current="page"{% endif %}>{{ ch }}</a>{% endfor %}
+</nav>
+
+{% if listing.taxa %}
+  <div class="card-grid card-grid--dense">
+    {% for taxon in listing.taxa %}{{ taxon_card(taxon, show_rank=rank in ('all', 'infraspecies')) }}{% endfor %}
+  </div>
+  {{ pager(listing.page, listing.pages, base ~ ('&letter=' ~ letter if letter else '') ~ '&') }}
+{% else %}
+  <section class="empty"><h2>Nothing here</h2><p>No taxa match these filters. Try another letter or rank.</p></section>
+{% endif %}
 {% endblock %}
