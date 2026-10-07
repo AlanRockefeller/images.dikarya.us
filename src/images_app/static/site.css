@@ -191,7 +191,7 @@ kbd { font: 12px var(--sans); border: 1px solid var(--line); border-bottom-width
   color: var(--ink); text-decoration: none; box-shadow: var(--shadow); transition: transform .12s ease;
 }
 .taxon-card:hover { transform: translateY(-2px); }
-.taxon-card__media { aspect-ratio: 4 / 3; background: var(--surface-2); }
+.taxon-card__media { display: block; aspect-ratio: 4 / 3; background: var(--surface-2); overflow: hidden; }
 .taxon-card__media img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .taxon-card__body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 2px; }
 .taxon-card__name { font-size: 16.5px; line-height: 1.25; }
@@ -440,9 +440,13 @@ p.guidance { padding: 12px 16px; }
 }
 @media (max-width: 700px) {
   :root { --row: 130px; }
+  .site-header { position: static; }
   .site-header__inner { flex-wrap: wrap; height: auto; padding: 10px 0; gap: 10px 14px; }
   .site-search { order: 3; flex-basis: 100%; max-width: none; }
-  .site-nav { gap: 14px; font-size: 14px; }
+  .site-nav { gap: 12px; font-size: 14px; }
+  .site-nav > a[href="/about"] { display: none; }
+  .letters { flex-wrap: nowrap; overflow-x: auto; margin: 0 calc(-1 * var(--gutter)) 18px; padding: 0 var(--gutter); scrollbar-width: none; }
+  .letters a { flex: none; }
   .account-menu__name { display: none; }
   .brand__name { font-size: 17px; }
   .stats { gap: 22px; }

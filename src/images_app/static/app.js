@@ -336,10 +336,9 @@
       const action = event.target.closest("button");
       if (action?.classList.contains("tray__remove")) { activeItem = null; toggle(id); return; }
       if (action?.dataset.move) { move(id, Number(action.dataset.move)); return; }
+      // Tapping an item shows its move/remove buttons (how touch users reorder).
       activeItem = activeItem === item.dataset.id ? null : item.dataset.id;
       $$(".tray__item", trayList).forEach((li) => li.classList.toggle("is-active", li.dataset.id === activeItem));
-      const tile = tileFor(id);
-      if (tile && !activeItem) openViewer(tile);
     });
 
     trayList.addEventListener("keydown", (event) => {

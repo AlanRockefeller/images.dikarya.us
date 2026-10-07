@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -81,8 +81,12 @@ async def http_error(request: Request, exc: StarletteHTTPException):
     if _wants_json(request):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
     if exc.status_code == 401:
-        target = quote(request.url.path + (f"?{request.url.query}" if request.url.query else ""))
-        return RedirectResponse(f"/login?next={target}", status_code=303)
+        # After logging in, return to the page (a form's target can't be revisited with GET).
+        if request.method == "GET":
+            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        else:
+            target = urlsplit(request.headers.get("referer", "")).path or "/"
+        return RedirectResponse(f"/login?next={quote(target)}", status_code=303)
     if not hasattr(request.state, "csrf_token"):
         request.state.csrf_token = new_csrf_token()
     titles = {404: "Page not found", 403: "Not allowed", 429: "Slow down"}
