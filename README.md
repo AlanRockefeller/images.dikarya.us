@@ -1,139 +1,158 @@
 # Dikarya Images
 
-A server-rendered FastAPI site for browsing licensed taxon photographs and letting registered users rank useful representations. iNaturalist is the canonical taxonomy. The first public directory is Fungi; the database and routes use generic taxa so other life groups can be enabled later.
+<https://images.dikarya.us> lets registered users rank the most useful photographs of each fungus. Every photo comes from an observation with an **ITS DNA barcode**, so identifications are as reliable as field photos get. iNaturalist is the canonical taxonomy. Photos come from iNaturalist and Mushroom Observer and are hot-linked, never copied.
 
-## Architecture
+The public site covers Fungi, but nothing in the schema or code assumes that. Add root taxa (`ROOT_TAXON_IDS`) to expose other groups.
 
-- FastAPI, Jinja2, locally vendored HTMX 2.0.4, and plain CSS; the browser loads source-hosted images directly. The pinned HTMX license is in `third_party/`.
-- PostgreSQL through SQLAlchemy 2.x, with Alembic migrations.
-- Argon2id password hashing and signed, HttpOnly session cookies with per-session CSRF tokens.
-- The official [iNaturalist taxonomy archive](https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip) supplies canonical taxa. Its field-filtered API supplies image metadata only when DNA Barcode ITS contains at least 50 IUPAC nucleotide bases or an explicit pointer such as “sequence in observation #123456789”. Blank values and non-sequence placeholders count as empty. Mushroom Observer's [nightly CSV exports](https://github.com/MushroomObserver/mushroom-observer/blob/main/README_API.md#csv-files) provide image/name links; its supported sequences API supplies observation-level DNA evidence.
-- No image files are stored here. Each displayed image includes source, creator, license, and a source record link.
-- A restrictive same-origin Content Security Policy keeps executable code local; external hosts are permitted only as image sources.
+## How it fits together
+
+```
+iNaturalist taxonomy DwC-A ─┐
+iNaturalist observations API ├─► sync jobs (images_app.sync) ─► PostgreSQL ◄─ FastAPI + Jinja (images_app.main)
+Mushroom Observer API ───────┘        systemd timers                           nginx ─► browsers
+```
+
+- **Python 3.12, FastAPI, SQLAlchemy 2, Alembic, Jinja2, PostgreSQL 16** (with `pg_trgm`). Server-rendered pages. One dependency-free script (`static/app.js`) adds search suggestions, infinite scroll, the photo viewer and ranking. Without JavaScript, pages still browse and ranking falls back to plain form posts.
+- `src/images_app/`
+  - `models.py`: the schema (see below). `alembic/versions/` holds the migrations.
+  - `catalog.py`: taxon search, directory and tree queries. `gallery.py`: galleries, results and rankings. `ranking.py`: saving a ranking.
+  - `routes/`: `public`, `account`, `ranking` (JSON API plus no-JS fallback) and `admin`.
+  - `security.py`: argon2id passwords, server-side sessions, CSRF and rate limits.
+  - `sync/`: `taxonomy.py`, `inaturalist.py` and `mushroom_observer.py` import data; `its.py` decides what counts as ITS evidence; `maintenance.py` recomputes counts, covers and vote order; `runs.py` handles locking and run history.
+  - `cli.py`: the `images` command (admin accounts, syncs).
+
+### Data model
+
+| Table | Purpose |
+|---|---|
+| `taxa` | iNaturalist taxa. `inat_taxon_id` (unique) is the identity used in URLs (`/taxon/48715/amanita-muscaria`; the slug is cosmetic). `ancestor_ids` is an array of iNat IDs (GIN indexed). Also holds denormalized `image_count`, `subtree_image_count` and `cover_image_id`. |
+| `taxon_names` | Searchable names: accepted, synonyms (renamed taxa, iNat taxon swaps, manual MO mappings) and English common names. Trigram indexed. |
+| `images` | Metadata for one remote photo: source, source IDs, URLs (thumb/medium/large), dimensions, photographer, license, attribution, observation date, faves and ITS length. Unique on `(source, source_image_id)`. Hidden photos keep their row, with `is_active = false` and an `inactive_reason`. |
+| `source_names` | Mushroom Observer names and how each maps to an iNat taxon (`exact`, `rank`, `synonym`, `alias`, `manual`, or `ambiguous`/`unresolved`), with candidate taxa, for auditing and review. |
+| `votes` | One row per (user, taxon, image) with a `rank`. Ranks are contiguous from 1 per user and taxon. Unique on (user, taxon, image) and on (user, taxon, rank), the latter deferred so a whole ranking can be rewritten in one transaction. |
+| `visible_votes` (view) | Votes on photos currently shown in the voted taxon's gallery. Aggregates and covers read from it. |
+| `users`, `user_sessions`, `rate_limit_hits` | Accounts (case-insensitive unique email), server-side sessions (only a hash of the cookie token is stored) and login/registration throttling. |
+| `sync_state`, `sync_runs` | Cursor, last start/finish/success, status, error and record counts per job, plus a run history with statistics. |
+
+**Galleries.** Taxa at genus rank and below show their own photos plus those of their subtaxa, so a species page includes its varieties. A "Hide photos of subtaxa" toggle narrows this. Votes always belong to the taxon page where they were cast. Higher ranks show their subtaxa as cards. (`SUBTREE_MAX_RANK_LEVEL` in `models.py` and the `visible_votes` view must agree.)
+
+**Votes are never thrown away.** If a photo disappears upstream, loses its license or is re-identified, its votes stay in `votes` but drop out of `visible_votes`. Maintenance renumbers each affected ranking so the visible picks are still 1, 2, 3… and the hidden ones follow. No score is stored. Results are computed from the raw votes: the *Community results* tab shows 1st/2nd/3rd-place counts, number of people and mean rank, ordered like a medal table. Other algorithms can be added later without changing the schema.
+
+## What gets imported
+
+**Only observations with ITS evidence.**
+- iNaturalist: the **DNA Barcode ITS** observation field (id 2330) must contain a nucleotide sequence of at least 50 bases (FASTA headers, wrapping and numbering are fine) or point to the sequenced observation ("see inaturalist.org/observations/123…"). Placeholders like "pending" don't count. The API's field filter means only those observations are ever requested.
+- Mushroom Observer: the observation needs a sequence record whose locus names ITS (`ITS`, `DNA Barcode ITS`, `nrITS`, `ITS1F-ITS4`, …) and that has bases or a GenBank/UNITE accession.
+
+**Only displayable licenses:** CC0, public domain, CC BY, CC BY-SA, CC BY-NC and CC BY-NC-SA (`DISPLAY_LICENSES`). NC licenses are allowed because this site is non-commercial; about 85% of licensed ITS photos on iNaturalist are CC BY-NC. If the site ever becomes commercial, remove the NC codes and run `sync full`. ND licenses are excluded because thumbnails are cropped. Photos with other licenses are stored hidden (`inactive_reason = 'license'`), never shown.
+
+**Mushroom Observer names** map to iNat taxa by exact accepted name (MO's "var."/"f." connectors normalized), then MO's synonym/misspelling links, then known aliases. If several iNat taxa fit, the name is marked *ambiguous*. Group, "sensu", "cf." and provisional names stay *unresolved*. Their photos stay hidden until an admin maps them at **/admin/names**. Manual mappings are never overwritten. MO observations that link to an iNat observation already imported are hidden as duplicates.
 
 ## Local development
 
 ```sh
-python3.12 -m venv .venv
-. .venv/bin/activate
+python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e '.[test]'
-cp .env.example .env
-# Edit .env for your local PostgreSQL role/database and generate SESSION_SECRET.
-createdb images
+cp .env.example .env            # set DATABASE_URL and SECRET_KEY
+createdb images && psql images -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
 alembic upgrade head
+python -m images_app.cli sync full   # ~35 min: taxonomy, every iNat ITS observation, MO
 uvicorn images_app.main:app --reload
 ```
 
-For peer auth, run the app under a matching PostgreSQL role or set `DATABASE_URL` to the local socket and role. Production uses `postgresql+psycopg:///images` under the `images` Unix account.
+For a quicker start, `python -m images_app.cli sync inaturalist --full --max-requests 50` loads about 10,000 observations. It stops with a "budget" error and resumes from there next time.
 
-## Database and admin
+### Tests
 
-Apply schema changes with `alembic upgrade head`; inspect with `alembic current` and roll back one migration with `alembic downgrade -1` when appropriate. Set a first administrator without placing a password in shell history:
+The tests need a disposable PostgreSQL database (they drop and recreate its `public` schema). They never touch the network: the HTTP clients get mock transports.
 
 ```sh
-python -m images_app.cli create-admin
+createdb images_test
+TEST_DATABASE_URL=postgresql+psycopg:///images_test pytest
 ```
 
-Run the command as the `images` account so PostgreSQL peer authentication uses the existing Unix role. It prompts for name, email, and password without putting the password in shell history. A current admin can grant admin access to another account with `python -m images_app.cli promote-admin EMAIL`.
+The suite covers registration, duplicate emails, login/logout, session fixation, CSRF, rate limiting, the singular-hostname redirect, ranking (first pick = 1, gaps closing, reordering, uniqueness constraints, independent users, hidden and re-identified photos, subtaxa), the directory, search, gallery paging, results, iNat and MO import idempotency, ITS detection, name mapping, the taxonomy import, and the migration from the first version's schema.
 
-## Tests
-
-Run `pytest`. Tests use an isolated SQLite database where possible and never contact external sites. PostgreSQL-specific migration/import checks can use a disposable PostgreSQL database by setting `TEST_DATABASE_URL`.
-
-## Import and synchronization
-
-Import commands are restartable and upsert by source identifiers. They stream tab-separated/gzip input and report counts. Do not download or serve photos without an allowed license; the iNaturalist adapter allows CC0, the Public Domain Mark, CC BY, and CC BY-SA for display by default. Change that policy only after review.
-
-### iNaturalist DNA-only reconciliation
-
-The monthly job downloads the current taxonomy DwC-A (about 80 MB) and imports its accepted fungal taxa. It then requests observations from the iNaturalist API with the exact **DNA Barcode ITS** field filter (field ID 2330), handling up to 200 observations per request and pacing requests at least two seconds apart. A field value qualifies when it contains at least 50 IUPAC nucleotide bases (including wrapped FASTA) or an explicit pointer to another observation's sequence. A present field with a blank value or text that is not a sequence or pointer is counted as empty and its photos are not imported. The reconciliation log reports sequence, pointer, empty, and missing field counts. The response includes each observation's photo URLs, licenses, and attribution; the importer keeps only explicitly displayable licenses. It does not download or scan the much larger open-data observation, observer, and photo dumps. The job is capped at 4,000 API calls and retries transient connection failures and throttled/server-error responses with backoff, leaving headroom under iNaturalist's [recommended daily limit](https://www.inaturalist.org/pages/api+recommended+practices) for other applications using the same server IP. The job is idempotent and only reconciles old image rows after a complete scan. Images absent from that completed DNA-filtered scan are deactivated; unverified image metadata with no votes is deleted in batches. If any image has votes, it is retained inactive so the vote history stays auditable. The taxon table is retained.
-
-Taxon galleries can be sorted by **Community ranking** or **Most iNaturalist favorites**. Favorite counts are observation-level metadata, so all photos attached to one iNaturalist observation share its count. Images without a count, including Mushroom Observer images, sort after counted observations. A complete iNaturalist reconciliation refreshes existing counts; daily incremental runs update counts for observations they fetch.
-
-To run the reconciliation manually:
+## Command line
 
 ```sh
-python -m images_app.importers.inaturalist_reconcile \
-  --taxonomy-dwca /var/lib/images-import/inaturalist-open-data/inaturalist-taxonomy.dwca.zip \
-  --stage-dir /var/lib/images-import
+python -m images_app.cli create-admin                  # prompts for name, email, password
+python -m images_app.cli promote-admin person@example.org
+python -m images_app.cli sync daily        # iNat incremental + MO + maintenance
+python -m images_app.cli sync full         # taxonomy + iNat full scan + MO + maintenance
+python -m images_app.cli sync taxonomy [--archive FILE]
+python -m images_app.cli sync inaturalist [--full] [--max-requests N]
+python -m images_app.cli sync mushroom-observer
+python -m images_app.cli sync maintenance  # recount, covers, vote order
 ```
 
-Only image metadata is stored locally. External image files continue to load from their source URLs.
+All sync commands take one PostgreSQL advisory lock, so two never run at once (a second one exits with status 75). Each step is recorded in `sync_runs`/`sync_state` and shown at **/admin**. A failed step doesn't stop the later ones, but the command exits non-zero.
 
-### Daily incremental synchronization
+### Synchronization details
 
-`python -m images_app.importers.inaturalist_incremental` asks the iNaturalist API only for observations updated since the persisted cursor (page size 200, custom User-Agent, at least two seconds between requests, bounded at 1,000 calls per run). Transient connection failures and throttling/server errors are retried with backoff. It retires an observation's old images when the ITS field is removed or has no sequence evidence, and imports licensed photos only when the field contains at least 50 IUPAC nucleotide bases or an explicit observation pointer. Each run logs sequence, pointer, empty, and missing field totals. If a long scan hits its request cap, it resumes by ID, then replays the entire same update window from ID zero before advancing the cursor. That replay catches lower-ID records edited while the backlog was being processed. The API is not used for per-observation requests.
+- **Taxonomy** (part of `sync full`): downloads `inaturalist-taxonomy.dwca.zip` (~80 MB, reused if under 20 days old) to `IMPORT_DATA_DIR`. It streams the archive twice and upserts every descendant of the root taxa (~74,000 for Fungi). Taxa missing from a new archive are marked inactive, never deleted. Renamed taxa keep their old name as a synonym, and for taxa that disappear, iNat's API is asked which taxon replaced them. The job refuses to deactivate more than 20% of taxa at once, in case an archive is truncated.
+- **iNaturalist full scan**: pages through `/v2/observations?taxon_id=47170&field:DNA Barcode ITS=` by ascending ID, 200 per page, about 1 request per second with a descriptive User-Agent and retries with backoff. That's about 950 requests, well within iNat's [recommended limits](https://www.inaturalist.org/pages/api+recommended+practices). Progress is saved after every page, so an interrupted scan resumes. Only after a *complete* scan are photos that weren't seen marked `missing_upstream`. This catches deleted observations, removed photos, license changes and removed ITS fields.
+- **iNaturalist incremental** (daily): fetches only observations updated since the last success (with an hour's overlap). It updates re-identifications, licenses and faves, and hides photos removed from those observations. With no previous full scan, or a backlog larger than half its request budget, it runs a full scan instead.
+- **Mushroom Observer**: reads all sequences (~33 requests), then fetches the ITS observations by ID with consensus names and images (~160 requests, 5 seconds apart). Every run is a complete refresh; photos no longer present are hidden.
+- **Maintenance**: renumbers votes, recounts photos per taxon and subtree, and picks cover photos. A cover is the community's favorite (most first places); without votes, a species uses its most-faved photo and higher taxa borrow their best-photographed species' cover.
 
-`python -m images_app.importers.mushroom_observer --observations https://mushroomobserver.org/observations.csv --images-observations https://mushroomobserver.org/images_observations.csv --images https://mushroomobserver.org/images.csv --names https://mushroomobserver.org/names.csv` streams the official nightly exports. Despite their `.csv` names, the live export files are tab-delimited; the four endpoint headers and sample rows were checked on 2026-09-24. Because the published MO CSV set does not include sequence records, the importer also reads the supported sequences API in pages of 1,000, waiting at least five seconds between requests. Only images linked to observations with non-empty sequence bases or an accession are considered; it does not scrape rendered pages. The importer bounds SQLite name-ID lookups and persists every image-to-name association for qualifying observations. MO names are matched by exact accepted scientific name, MO synonym links, or a unique known alias. If an image has conflicting qualified names, it remains unpublished until every associated name maps to the same iNaturalist taxon. Ambiguous/unmatched names remain in `source_taxa` for review; no fuzzy guess is published. Manual mappings recompute affected images and image counts.
+## Production
 
-### Full reconciliation
+The server layout (already in place) is:
 
-Run the DNA-only iNaturalist reconciliation monthly. It refreshes the accepted taxonomy archive and then queries only DNA Barcode ITS observations for image metadata. MO's current structured sources are its nightly database CSV exports and paginated sequences API; rerunning that importer is idempotent and updates source records in place. At the end of a successful MO import, stale images without sequence evidence are deactivated and unvoted unverified records are pruned in batches.
+- Code: `/var/www/images.dikarya.us/app` (this repository, owned by `alan`, readable by group `images`). Virtualenv: `app/.venv`. Services run from `src/` via `PYTHONPATH`, so a `git pull` plus a restart deploys.
+- Secrets: `/var/www/images.dikarya.us/.env`, read by systemd as `EnvironmentFile`. Needs `APP_ENV=production`, `BASE_URL=https://images.dikarya.us`, `DATABASE_URL=postgresql+psycopg:///images` (peer auth as Unix user `images`) and `SECRET_KEY` (or the older name `SESSION_SECRET`), at least 32 random characters. Optional: `CONTACT_EMAIL`, `ROOT_TAXON_IDS`, `DISPLAY_LICENSES`.
+- `deploy/images.service`: uvicorn on `127.0.0.1:8017`, as user `images`, sandboxed. It `Requires=` `images-migrate.service`, which runs `alembic upgrade head` first.
+- `deploy/images-import-daily.{service,timer}`: daily at 04:10 UTC, runs `scripts/import-daily.sh` (→ `sync daily`).
+- `deploy/images-import-reconcile.{service,timer}`: monthly, runs `scripts/import-reconcile.sh` (→ `sync full`).
+- `deploy/images.nginx.conf`: TLS for `images.dikarya.us`, and a permanent redirect from `image.dikarya.us` (HTTP and HTTPS) to `https://images.dikarya.us$request_uri`, keeping the path and query. The app also redirects that hostname itself. Certificates come from the existing Certbot setup. `deploy/images-acme-bootstrap.nginx.conf` is the HTTP-only vhost used to issue the first certificate.
 
-All import commands create/update `sync_state` records and return nonzero on failure. `flock` in the provided systemd units prevents overlapping daily jobs. Store downloaded files under a separately managed data directory, not the source tree.
-
-## Production deployment
-
-The production service runs as Unix user `images`, binds only to `127.0.0.1:8017`, and has read/execute access to code. Keep the source owned by `alan`; do not grant the service account write access. The unit uses `/var/www/images.dikarya.us/.env` as a systemd `EnvironmentFile`, so systemd reads it without exposing it to the app process as a file. The app reads `APP_ENV`, `BASE_URL`, `DATABASE_URL`, and `SESSION_SECRET` from the environment. The PostgreSQL role and database already exist; Unix-socket peer auth matches `User=images`. Uvicorn trusts forwarded headers only from `127.0.0.1`; nginx must overwrite `X-Forwarded-For` with `$remote_addr` so login and registration throttles use the connecting client address.
-
-Example service, timer, and nginx files are in `deploy/`. Before installing them, inspect the host's active vhosts and units. Back up any file being changed, run `nginx -t`, then reload nginx. The singular hostname redirects with `$request_uri` to the plural canonical HTTPS host. The nginx example expects a certificate covering both `images.dikarya.us` and `image.dikarya.us`; issue/expand it with the host's existing Certbot setup after DNS points at the server. Do not reload until certificate paths exist and `nginx -t` succeeds.
-
-For a new certificate, first install `deploy/images-acme-bootstrap.nginx.conf` as a new vhost, enable it, run `nginx -t`, and reload. It serves only ACME challenge files and returns 503 for other HTTP requests while the certificate is being issued. Then run `certbot certonly --webroot -w /var/www/letsencrypt -d images.dikarya.us -d image.dikarya.us`. After Certbot succeeds, back up the bootstrap vhost file, replace it with `deploy/images.nginx.conf`, run `nginx -t`, and reload. The final vhost redirects both HTTP names to HTTPS and redirects the singular HTTPS hostname to the canonical plural hostname while preserving path and query string.
-
-Example install flow (run as an administrator after reviewing the sample files). The recursive ownership and mode commands are idempotent; let each finish before continuing. They leave `alan` as owner and give `images` read/execute access only.
+### Deploying an update
 
 ```sh
-python3.12 -m venv /var/www/images.dikarya.us/app/.venv
-systemctl stop images.service images-import-daily.timer images-import-reconcile.timer
-systemctl stop images-import-daily.service images-import-reconcile.service
-/var/www/images.dikarya.us/app/.venv/bin/pip install /var/www/images.dikarya.us/app
-chown -R alan:images /var/www/images.dikarya.us/app
-chmod -R g+rX,g-w,o-rwx /var/www/images.dikarya.us/app
-install -o root -g root -m 0644 deploy/images-migrate.service /etc/systemd/system/images-migrate.service
-install -o root -g root -m 0644 deploy/images.service /etc/systemd/system/images.service
-install -o root -g root -m 0644 deploy/images-import-daily.service /etc/systemd/system/images-import-daily.service
-install -o root -g root -m 0644 deploy/images-import-daily.timer /etc/systemd/system/images-import-daily.timer
-install -o root -g root -m 0644 deploy/images-import-reconcile.service /etc/systemd/system/images-import-reconcile.service
-install -o root -g root -m 0644 deploy/images-import-reconcile.timer /etc/systemd/system/images-import-reconcile.timer
-systemctl daemon-reload
-systemctl reset-failed images.service images-import-daily.service images-import-reconcile.service
-systemctl start images-migrate.service
-systemctl enable --now images.service
-# Run the initial imports manually, then review their status.
-systemctl start images-import-daily.service
-systemctl start --no-block images-import-reconcile.service
+cd /var/www/images.dikarya.us/app && git pull
+sudo systemctl restart images.service          # runs migrations first, then starts the app
+journalctl -u images-migrate.service -u images.service -n 50
+```
+
+If unit files in `deploy/` changed, copy them to `/etc/systemd/system/` (back up the old ones first) and run `sudo systemctl daemon-reload`. If nginx config changes, back up the current vhost, install the new one, run `sudo nginx -t`, then `sudo systemctl reload nginx`.
+
+### Upgrading from the first version of the site
+
+Migration `0001` detects the first version's tables (it used the `alembic_version` table). It renames them, with their indexes and sequences, to `legacy_*`, copies user accounts into the new `users` table, and creates the new schema. Nothing is dropped. Photo and taxon data is then rebuilt by a full sync:
+
+```sh
+sudo systemctl restart images.service
+sudo systemctl start images-import-reconcile.service      # full sync, ~35 minutes
 journalctl -fu images-import-reconcile.service
-# After the initial reconciliation succeeds, enable unattended schedules.
-systemctl enable --now images-import-daily.timer images-import-reconcile.timer
 ```
 
-`journalctl -fu` follows the log and does not exit on its own. Pressing Ctrl-C there stops only the log viewer; a job started with `systemctl start --no-block` continues in the background. Check it with `systemctl status images-import-reconcile.service`.
+When you no longer need the old tables: `sudo -u images psql images -c 'DROP TABLE legacy_votes, legacy_image_source_taxa, legacy_images, legacy_source_taxa, legacy_taxon_aliases, legacy_taxa, legacy_sync_state, legacy_rate_limit_events, legacy_users, legacy_alembic_version'`.
 
-If resuming after an interrupted deployment, skip the virtual-environment and `pip install` lines when the venv and dependencies are already present. The systemd units put `src/` first on `PYTHONPATH`, so the app runs from the checked-out source; installing the package again is not needed to pick up source changes. The ownership and mode repair is safe to repeat.
+### First administrator
 
-The daily unit streams the official nightly MO CSVs, refreshes the MO sequence-observation list under MO's API pacing guidance, and runs the bounded iNaturalist incremental synchronizer. The monthly reconcile unit downloads the taxonomy archive and obtains photo metadata only from DNA Barcode ITS observations. Both import units create a private `/var/lib/images-import` state directory and use file locks to prevent overlapping runs of the same importer.
-
-After deployment, create the first administrator interactively with `sudo -u images env APP_ROOT=/var/www/images.dikarya.us/app PYTHONPATH=/var/www/images.dikarya.us/app/src /var/www/images.dikarya.us/app/.venv/bin/python -m images_app.cli create-admin`.
-
-## Nginx and systemd
-
-The sample `deploy/images.nginx.conf` is a standalone server block. It does not replace the global nginx configuration or another site's file. It supports Certbot HTTP challenges from `/var/www/letsencrypt`. Verify DNS and certificate availability, install a new site file, then:
+Run the CLI as the `images` user with the production environment:
 
 ```sh
-nginx -t
-systemctl reload nginx
+sudo systemd-run --pty --wait --collect --uid=images --gid=images \
+  -p EnvironmentFile=/var/www/images.dikarya.us/.env \
+  -p WorkingDirectory=/var/www/images.dikarya.us/app \
+  -E PYTHONPATH=/var/www/images.dikarya.us/app/src \
+  /var/www/images.dikarya.us/app/.venv/bin/python -m images_app.cli create-admin
 ```
 
-The service logs to journald (`journalctl -u images -f`); importer status/errors are also recorded in `sync_state`. `/healthz` performs a database query and returns 503 when PostgreSQL cannot be reached. Timer logs can be inspected with `journalctl -u images-import-daily.service`, `journalctl -u images-import-reconcile.service`, and `systemctl list-timers`.
+Or register on the site and run `promote-admin you@example.org` the same way. Accounts from the first version of the site carry over.
 
-## Browsing and rankings
+### Monitoring
 
-`/taxa` defaults to fungal species with images. The rank selector can show any other rank or all ranks. Galleries are paginated at 72 image references per page, with source, attribution, license, and external record links. Signed-in users can select or remove images immediately, reorder with the arrow controls, or drag selected cards by their handle; server-side validation persists contiguous ranks. Aggregates are queried from the individual rankings rather than stored as a fixed score.
+- `/healthz` returns `{"status": "ok"}` when the database answers.
+- `/admin` shows each job's status, last success, errors, per-run statistics and why photos are hidden.
+- `journalctl -u images-import-daily.service` and `systemctl list-timers 'images*'` show scheduled jobs.
 
-## Backups
+### Backups
 
-Back up PostgreSQL regularly with `pg_dump -Fc images` and test restores. Keep the `.env` and database backups restricted and encrypted; neither belongs in Git. The app stores no image bytes. The importers stream upstream data and retain no full source dumps.
+`pg_dump -Fc images > images-$(date +%F).dump` daily, with copies off the server. Restore tests matter more than the dump. The irreplaceable data is `users` and `votes`; everything else can be rebuilt with `sync full`. Keep `.env` out of git and backups encrypted.
 
-## Licensing
+## Licensing notes
 
-The site displays remote images and must honor the image-specific license, creator attribution, and source link. iNaturalist's open image collection includes licensed Creative Commons/public-domain media, but each photo has its own terms. The default importer admits CC0, the Public Domain Mark, CC BY, and CC BY-SA and records attribution. Mushroom Observer image licensing can vary; the importer stores license and attribution metadata and publishes only entries with an explicit allowed license. If licensing, attribution, or source URL cannot be validated, keep the record inactive until reviewed. A source can remove or change an image; reconciliation deactivates records rather than deleting vote history.
+Photos stay on iNaturalist's and Mushroom Observer's servers and are shown with photographer, license (linked to the deed) and a link to the source observation. Only the licenses listed above are displayed. Photos with unclear or restrictive licenses are kept as hidden metadata. The site is non-commercial, which the CC BY-NC photos require. Taxonomy data is from iNaturalist (CC0/CC BY).
