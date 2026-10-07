@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
+# Called by images-import-daily.service. Kept as a thin wrapper so installed
+# systemd units keep working; the logic lives in `python -m images_app.cli`.
 set -euo pipefail
-
-APP_DIR="/var/www/images.dikarya.us/app"
-IMPORT_DIR="/var/lib/images-import"
-mkdir -p "$IMPORT_DIR"
-
-echo "Starting bounded iNaturalist incremental sync"
-"$APP_DIR/.venv/bin/python" -m images_app.importers.inaturalist_incremental --stage-dir "$IMPORT_DIR"
-
-echo "Streaming official Mushroom Observer nightly CSV exports"
-"$APP_DIR/.venv/bin/python" -m images_app.importers.mushroom_observer \
-  --observations "https://mushroomobserver.org/observations.csv" \
-  --images-observations "https://mushroomobserver.org/images_observations.csv" \
-  --images "https://mushroomobserver.org/images.csv" \
-  --names "https://mushroomobserver.org/names.csv" \
-  --stage-dir "$IMPORT_DIR"
-
-echo "Daily image metadata synchronization completed"
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export IMPORT_DATA_DIR="${IMPORT_DATA_DIR:-/var/lib/images-import}"
+exec "$APP_DIR/.venv/bin/python" -m images_app.cli sync daily

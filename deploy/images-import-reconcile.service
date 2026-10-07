@@ -1,5 +1,5 @@
 [Unit]
-Description=Monthly iNaturalist metadata reconciliation
+Description=Full image metadata reconciliation (taxonomy, iNaturalist full scan, Mushroom Observer)
 After=network-online.target postgresql.service
 Wants=network-online.target postgresql.service
 
