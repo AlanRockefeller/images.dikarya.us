@@ -23,6 +23,29 @@ class SyncAlreadyRunning(RuntimeError):
     pass
 
 
+# A healthy run hides a few percent of photos at most. Hiding more than this
+# share at once more likely means an upstream outage or truncated response.
+MAX_HIDDEN_SHARE = 0.2
+
+
+def check_staleness(db: Session, source: str, seen_since: datetime) -> None:
+    """Refuse to hide photos not seen since `seen_since` if that is implausibly many."""
+    active, stale = db.execute(
+        text(
+            """
+            SELECT count(*), count(*) FILTER (WHERE last_seen_at < :since)
+            FROM images WHERE source = :source AND is_active
+            """
+        ),
+        {"source": source, "since": seen_since},
+    ).one()
+    if active and stale > MAX_HIDDEN_SHARE * active:
+        raise RuntimeError(
+            f"{source}: {stale} of {active} shown photos were not seen in this run; refusing to "
+            "hide them (upstream outage?). Investigate, then rerun."
+        )
+
+
 @dataclass
 class Run:
     job: str

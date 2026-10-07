@@ -108,15 +108,24 @@ def test_full_scan_is_idempotent(db, species):
 
 
 def test_completed_full_scan_deactivates_missing_photos_but_keeps_votes(db, species, make):
-    run_full(FakeINat([observation(1), observation(2)]))
+    run_full(FakeINat([observation(n) for n in range(1, 11)]))
     user = make.user()
     gone = images(db)["10"]
     db.add(Vote(user_id=user.id, taxon_id=gone.taxon_id, image_id=gone.id, rank=1))
     db.commit()
-    run_full(FakeINat([observation(2)]))
+    run_full(FakeINat([observation(n) for n in range(2, 11)]))
     db.expire_all()
     assert (images(db)["10"].is_active, images(db)["10"].inactive_reason) == (False, "missing_upstream")
     assert db.scalar(select(Vote.image_id)) == gone.id
+
+
+def test_full_scan_refuses_to_hide_most_photos(db, species):
+    run_full(FakeINat([observation(n) for n in range(1, 11)]))
+    with pytest.raises(RuntimeError, match="refusing"):
+        run_full(FakeINat([observation(1)]))  # e.g. an API outage returning almost nothing
+    db.expire_all()
+    assert all(image.is_active for image in images(db).values())
+    assert "full_scan" not in get_cursor(db, "inaturalist")  # the next attempt starts over
 
 
 def test_interrupted_full_scan_resumes(db, species):

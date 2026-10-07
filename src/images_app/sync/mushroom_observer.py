@@ -30,7 +30,7 @@ from images_app.db import SessionLocal
 from images_app.models import Image, SourceName, Taxon, TaxonName
 from images_app.sync.http import PoliteClient
 from images_app.sync.its import is_its_locus, sequence_length
-from images_app.sync.runs import Run
+from images_app.sync.runs import Run, check_staleness
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,7 @@ def sync(run: Run, client: PoliteClient) -> None:
             _store_observations(db, run, payload.get("results", []), its_observations, inat_observations)
             if offset and offset % 2000 == 0:
                 log.info("Mushroom Observer: %d of %d observations", offset, len(ids))
+        check_staleness(db, SOURCE, run.started_at)
         missing = db.execute(
             update(Image)
             .where(Image.source == SOURCE, Image.last_seen_at < run.started_at, Image.is_active)

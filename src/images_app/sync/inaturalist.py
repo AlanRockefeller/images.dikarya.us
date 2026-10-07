@@ -30,7 +30,7 @@ from images_app.db import SessionLocal
 from images_app.models import Image, Taxon
 from images_app.sync.http import PoliteClient
 from images_app.sync.its import INAT_ITS_FIELD_NAME, inat_its_evidence
-from images_app.sync.runs import Run, get_cursor, save_cursor
+from images_app.sync.runs import Run, check_staleness, get_cursor, save_cursor
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +105,9 @@ def full_scan(run: Run, client: PoliteClient) -> None:
             save_cursor(db, JOB, cursor)
             if run.stats.get("observations", 0) % 10_000 < PAGE_SIZE:
                 log.info("full scan: %d observations so far", run.stats["observations"])
+        cursor.pop("full_scan", None)  # finished: the next full scan starts from the beginning
+        save_cursor(db, JOB, cursor)
+        check_staleness(db, "inaturalist", scan_started)
         missing = db.execute(
             text(
                 """
@@ -117,7 +120,6 @@ def full_scan(run: Run, client: PoliteClient) -> None:
             {"started": scan_started},
         ).rowcount
         run.count("deactivated_missing", missing)
-        cursor.pop("full_scan", None)
         cursor["updated_since"] = (scan_started - INCREMENTAL_OVERLAP).isoformat()
         save_cursor(db, JOB, cursor)
 
