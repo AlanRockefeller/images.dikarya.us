@@ -135,7 +135,7 @@ def _store_observations(
     its_lengths: dict[int, int],
     inat_observations: set[str],
 ) -> None:
-    rows = []
+    rows: dict[str, dict] = {}  # keyed by image ID: one image can belong to several observations
     for obs in observations:
         run.count("observations")
         run.records += 1
@@ -168,7 +168,7 @@ def _store_observations(
             run.count("photos")
             run.count("active_photos" if reason is None else f"inactive_{reason}")
             base = "https://mushroomobserver.org/images"
-            rows.append(
+            rows[str(image["id"])] = (
                 {
                     "source": SOURCE,
                     "source_image_id": str(image["id"]),
@@ -191,7 +191,7 @@ def _store_observations(
             )
     if rows:
         seen_at = datetime.now(timezone.utc)  # compared with run.started_at, so use the same clock
-        rows = [row | {"last_seen_at": seen_at} for row in rows]
+        rows = [row | {"last_seen_at": seen_at} for row in rows.values()]
         statement = insert(Image).values(rows)
         db.execute(
             statement.on_conflict_do_update(

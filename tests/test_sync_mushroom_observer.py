@@ -45,6 +45,8 @@ OBSERVATIONS = {
     106: mo_observation(106, 1, "Amanita muscaria", links=["https://www.inaturalist.org/observations/777"]),
     107: mo_observation(107, 6, "Boletus mysterius"),
 }
+# MO lets one image belong to several observations.
+OBSERVATIONS[100]["images"].append(dict(OBSERVATIONS[101]["images"][0]))
 SEQUENCES = [
     {"id": 1, "observation_id": 100, "locus": "ITS", "bases": BASES, "accession": ""},
     {"id": 2, "observation_id": 101, "locus": "DNA Barcode ITS", "bases": "", "accession": "MK000001"},
