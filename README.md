@@ -56,7 +56,7 @@ pip install -e '.[test]'
 cp .env.example .env            # set DATABASE_URL and SECRET_KEY
 createdb images && psql images -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
 alembic upgrade head
-python -m images_app.cli sync full   # ~35 min: taxonomy, every iNat ITS observation, MO
+python -m images_app.cli sync full   # ~65 min: taxonomy, every iNat ITS observation, MO
 uvicorn images_app.main:app --reload
 ```
 
@@ -93,7 +93,7 @@ All sync commands take one PostgreSQL advisory lock, so two never run at once (a
 - **Taxonomy** (part of `sync full`): downloads `inaturalist-taxonomy.dwca.zip` (~80 MB, reused if under 20 days old) to `IMPORT_DATA_DIR`. It streams the archive twice and upserts every descendant of the root taxa (~74,000 for Fungi). Taxa missing from a new archive are marked inactive, never deleted. Renamed taxa keep their old name as a synonym, and for taxa that disappear, iNat's API is asked which taxon replaced them. The job refuses to deactivate more than 20% of taxa at once, in case an archive is truncated.
 - **iNaturalist full scan**: pages through `/v2/observations?taxon_id=47170&field:DNA Barcode ITS=` by ascending ID, 200 per page, about 1 request per second with a descriptive User-Agent and retries with backoff. That's about 950 requests, well within iNat's [recommended limits](https://www.inaturalist.org/pages/api+recommended+practices). Progress is saved after every page, so an interrupted scan resumes. Only after a *complete* scan are photos that weren't seen marked `missing_upstream`. This catches deleted observations, removed photos, license changes and removed ITS fields.
 - **iNaturalist incremental** (daily): fetches only observations updated since the last success (with an hour's overlap). It updates re-identifications, licenses and faves, and hides photos removed from those observations. With no previous full scan, or a backlog larger than half its request budget, it runs a full scan instead.
-- **Mushroom Observer**: reads all sequences (~33 requests), then fetches the ITS observations by ID with consensus names and images (~160 requests, 5 seconds apart). Every run is a complete refresh; photos no longer present are hidden.
+- **Mushroom Observer**: reads all sequences (~33 requests), then fetches the ITS observations by ID with consensus names and images (about 29,000 observations in ~290 requests, 5 seconds apart: roughly half an hour). Every run is a complete refresh; photos no longer present are hidden.
 - **Safety checks**: a run that would hide more than 20% of the photos currently shown from a source (or deactivate more than 20% of taxa) stops with an error instead. That usually means an upstream outage or a truncated response. Investigate, then rerun.
 - **Maintenance**: renumbers votes, recounts photos per taxon and subtree, and picks cover photos. A cover is the community's favorite (most first places); without votes, a species uses its most-faved photo and higher taxa borrow their best-photographed species' cover.
 
@@ -124,7 +124,7 @@ Migration `0001` detects the first version's tables (it used the `alembic_versio
 
 ```sh
 sudo systemctl restart images.service
-sudo systemctl start images-import-reconcile.service      # full sync, ~35 minutes
+sudo systemctl start images-import-reconcile.service      # full sync, about an hour
 journalctl -fu images-import-reconcile.service
 ```
 

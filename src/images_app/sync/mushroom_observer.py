@@ -8,8 +8,9 @@
    and, like unresolved names, wait in the admin review queue. The original MO
    name is stored on every image so mappings can be audited.
 
-The whole set is small (about 15,000 observations), so every run is a full
-refresh. MO asks API clients to be gentle; requests are spaced five seconds apart.
+The set is small enough (about 29,000 observations, ~320 requests) that every
+run is a full refresh. MO asks API clients to be gentle, so requests are five
+seconds apart and a run takes about half an hour.
 """
 
 from __future__ import annotations
