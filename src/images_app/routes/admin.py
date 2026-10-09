@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from images_app import logs
 from images_app.db import get_db
 from images_app.models import Image, SourceName, SyncRun, SyncState, Taxon, User, Vote
 from images_app.sync.maintenance import refresh_derived_data
@@ -86,6 +87,7 @@ def names(request: Request, status: str = "unresolved", page: int = 1, db: Sessi
 
 @router.post("/names/{source_name_id}/map", dependencies=[Depends(verify_csrf)])
 def map_name(
+    request: Request,
     source_name_id: int,
     inat_taxon_id: int = Form(),
     status: str = Form("unresolved"),
@@ -99,7 +101,11 @@ def map_name(
         raise HTTPException(404, "Unknown source name.")
     if taxon is None:
         raise HTTPException(422, "No active iNaturalist taxon with that ID is loaded.")
+    previous = source_name.taxon_id
     set_manual_mapping(db, source_name, taxon)
     db.commit()
+    logs.event(logs.activity, "admin.map_name", request, source_name=source_name.name,
+               mo_name_id=source_name.source_name_id, taxon=taxon.inat_taxon_id, taxon_name=taxon.name,
+               previous_taxon_id=previous)
     refresh_derived_data(db)
     return RedirectResponse(f"/admin/names?status={status}", status_code=303)

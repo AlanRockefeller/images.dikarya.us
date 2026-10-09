@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from images_app import catalog, gallery
+from images_app import catalog, gallery, logs
 from images_app.db import get_db
 from images_app.models import Taxon, User, Vote
 from images_app.templating import plain_name, taxon_url
@@ -75,6 +75,8 @@ def directory(
 def search_page(request: Request, q: str = "", db: Session = Depends(get_db),
                 user: User | None = Depends(current_user)):
     results = catalog.search(db, q, limit=40)
+    if q.strip():
+        logs.event(logs.activity, "search", request, q=q.strip(), results=len(results))
     exact = [taxon for taxon, alias in results if alias is None and taxon.name.lower() == q.strip().lower()]
     if len(exact) == 1:
         return RedirectResponse(taxon_url(exact[0]), status_code=303)

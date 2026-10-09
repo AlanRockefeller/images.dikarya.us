@@ -2,13 +2,14 @@ from sqlalchemy import func, select
 
 from images_app.models import User, UserSession
 
-from .conftest import csrf, login
+from .conftest import csrf, form_stamp, login
 
 
-def register(client, email="new@example.org", password="a good long password", name="New Person"):
+def register(client, email="new@example.org", password="a good long password", name="New Person", **extra):
     return client.post(
         "/register",
-        data={"name": name, "email": email, "password": password, "csrf_token": csrf(client)},
+        data={"name": name, "email": email, "password": password, "csrf_token": csrf(client),
+              "stamp": form_stamp()} | extra,
         follow_redirects=False,
     )
 

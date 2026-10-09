@@ -150,6 +150,30 @@ Or register on the site and run `promote-admin you@example.org` the same way. Ac
 - `/admin` shows each job's status, last success, errors, per-run statistics and why photos are hidden.
 - `journalctl -u images-import-daily.service` and `systemctl list-timers 'images*'` show scheduled jobs.
 
+### Activity and security logs
+
+Besides the service log (`journalctl -u images`), the app writes three event logs to the journal, each under its own name:
+
+| Log | Contents |
+|---|---|
+| `images-activity` | Sign-ups, logins and logouts; every ranking change (what was added, removed or reordered); searches; admin name mappings. Problems people hit: failed logins, expired forms, invalid input, broken internal links, server errors (with the reference shown on the error page), and failed saves or script errors reported by browsers. |
+| `images-attack` | Requests that look aimed at this site, whether or not the sender is logged in: SQL, script, template or command injection and path traversal sent to real pages or form fields, attack tools (sqlmap, Nikto, …), forged cross-site requests, made-up session cookies, password guessing (rate limit reached), members probing `/admin`, ranking submissions with photo IDs the page never offered, open-redirect attempts and malformed API calls. After any of these, **everything that IP does for the next hour is also logged here**, so you can see what the attacker tried next. |
+| `images-scanner` | Background noise from bots that probe every server: requests for WordPress, PHP, `.env`, `.git` and other software this site doesn't run, payloads sent to pages that don't exist, known scanner user agents, anonymous `/admin` probes, blind form posts and blocked sign-up bots. |
+
+Each line is `event=<name> key=value …` with the IP, user (`id:email`), path, request ID (`rid`, also sent as the `X-Request-ID` header) and user agent. Client-supplied values are quoted and escaped, so they can't break or forge log lines. Passwords are never logged.
+
+```sh
+journalctl -t images-attack -f                      # follow targeted attacks live
+journalctl -t images-attack --since today -o cat     # today's, without the syslog prefix
+journalctl -t images-activity -g 'ranking.save'      # ranking changes
+journalctl -t images-activity -g 'rid=3f9a0c1b2d4e'  # everything about one request (reference from an error page)
+journalctl -t images-scanner --since -1d -o cat | grep -o 'ip=[^ ]*' | sort | uniq -c | sort -rn | head   # noisiest scanners
+```
+
+To also have them as files in `/var/log/images/{activity,attack,scanner}.log`, install `deploy/images-logs.rsyslog.conf` and `deploy/images-logs.logrotate`; the commands are at the top of the rsyslog file.
+
+**Sign-up bots** are stopped by a hidden "website" field that people never see but bots fill in, and by a signed timestamp: forms submitted less than 2 seconds after the page loaded, or with a missing or forged timestamp, are refused. A person caught by this sees "please submit it again" with their entries kept, and the second attempt goes through. Blocked attempts appear in `images-scanner` as `register.bot`.
+
 ### Backups
 
 `pg_dump -Fc images > images-$(date +%F).dump` daily, with copies off the server. Restore tests matter more than the dump. The irreplaceable data is `users` and `votes`; everything else can be rebuilt with `sync full`. Keep `.env` out of git and backups encrypted.

@@ -8,6 +8,24 @@
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  /* Tell the server about problems people run into (logged in the activity log). */
+  let reports = 0;
+  function reportProblem(kind, message) {
+    if (reports >= 5) return;
+    reports += 1;
+    fetch("/api/client-problem", {
+      method: "POST",
+      keepalive: true,
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ kind, message: String(message).slice(0, 500), page: location.pathname.slice(0, 300) }),
+    }).catch(() => {});
+  }
+  window.addEventListener("error", (event) => {
+    if (event.error) reportProblem("script_error", `${event.message} at ${event.filename}:${event.lineno}`);
+  });
+  window.addEventListener("unhandledrejection", (event) => reportProblem("script_error", event.reason));
+
   /* Remote photos can disappear; show a placeholder instead of a broken image. */
   document.addEventListener("error", (event) => {
     const img = event.target;
@@ -218,6 +236,7 @@
   async function flush() {
     saving = true;
     let delay = 1000;
+    let failures = 0;
     while (dirty) {
       dirty = false;
       const sent = ranking.slice();
@@ -242,6 +261,8 @@
         delay = 1000;
       } catch (error) {
         dirty = true;
+        failures += 1;
+        if (failures === 3) reportProblem("save_failed", `ranking save failed 3 times: ${error.message}`);
         setStatus("Couldn’t save. Retrying…", "error");
         await sleep(delay);
         delay = Math.min(delay * 2, 30000);

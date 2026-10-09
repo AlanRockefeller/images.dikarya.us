@@ -59,7 +59,3 @@ def set_ranking(db: Session, user: User, taxon: Taxon, image_ids: list[int]) -> 
     db.commit()
     return wanted
 
-
-def toggle(db: Session, user: User, taxon: Taxon, image_id: int, current: list[int]) -> list[int]:
-    order = [i for i in current if i != image_id] if image_id in current else [*current, image_id]
-    return set_ranking(db, user, taxon, order)

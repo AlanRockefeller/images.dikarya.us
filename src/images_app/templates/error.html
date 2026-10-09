@@ -4,6 +4,7 @@
 <section class="empty empty--page">
   <h1>{{ title }}</h1>
   <p>{{ message }}</p>
+  {% if request_id %}<p class="muted"><small>Reference: {{ request_id }}</small></p>{% endif %}
   <p><a class="button" href="/">Go to the home page</a></p>
 </section>
 {% endblock %}

@@ -9,6 +9,7 @@ search and deferred constraints). Point TEST_DATABASE_URL at one; it is wiped.
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import re
 
@@ -154,6 +155,54 @@ def login(client, email="ranker@example.org", password="a good long password"):
     )
     assert response.status_code == 303, response.text
     return response
+
+
+def form_stamp(purpose: str = "register", age: float = 30) -> str:
+    """A validly signed form timestamp issued `age` seconds ago."""
+    import hashlib
+    import hmac
+    import time
+
+    issued = str(int(time.time() - age))
+    signature = hmac.new(os.environ["SECRET_KEY"].encode(), f"{purpose}:{issued}".encode(), hashlib.sha256)
+    return f"{issued}.{signature.hexdigest()[:24]}"
+
+
+@pytest.fixture(autouse=True)
+def forget_watched_ips():
+    from images_app import logs
+
+    logs._watched.clear()
+    yield
+
+
+class LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records: list[tuple[str, str]] = []
+
+    def emit(self, record):
+        self.records.append((record.name.split(".")[-1], record.getMessage()))
+
+    def events(self, stream: str | None = None) -> list[str]:
+        return [m.split()[0].removeprefix("event=") for s, m in self.records if stream in (None, s)]
+
+    def find(self, stream: str, event: str) -> str:
+        matches = [m for s, m in self.records if s == stream and m.split()[0] == f"event={event}"]
+        assert matches, f"no {stream} event {event}; got {self.records}"
+        return matches[-1]
+
+
+@pytest.fixture
+def logged():
+    from images_app import logs
+
+    capture = LogCapture()
+    for logger in logs.STREAMS:
+        logger.addHandler(capture)
+    yield capture
+    for logger in logs.STREAMS:
+        logger.removeHandler(capture)
 
 
 def page_csrf(html: str) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 from argon2 import PasswordHasher
@@ -78,6 +79,24 @@ def new_csrf_token() -> str:
 
 def csrf_matches(cookie_token: str | None, submitted: str | None) -> bool:
     return bool(cookie_token and submitted) and hmac.compare_digest(cookie_token, submitted)
+
+
+def form_stamp(purpose: str) -> str:
+    """A signed timestamp for a form, used to spot bots that submit instantly."""
+    issued = str(int(time.time()))
+    signature = hmac.new(settings.secret_key.encode(), f"{purpose}:{issued}".encode(), hashlib.sha256)
+    return f"{issued}.{signature.hexdigest()[:24]}"
+
+
+def form_stamp_age(purpose: str, stamp: str | None) -> float | None:
+    """Seconds since `stamp` was issued, or None if it is missing or forged."""
+    issued, _, signature = (stamp or "").partition(".")
+    if not issued.isdigit():
+        return None
+    expected = hmac.new(settings.secret_key.encode(), f"{purpose}:{issued}".encode(), hashlib.sha256)
+    if not hmac.compare_digest(expected.hexdigest()[:24], signature):
+        return None
+    return time.time() - int(issued)
 
 
 def rate_limited(db: Session, bucket: str, key: str, limit: int, window: timedelta) -> bool:

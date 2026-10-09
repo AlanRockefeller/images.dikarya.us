@@ -8,6 +8,10 @@
   <form method="post" action="/register" class="form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="next" value="{{ next }}">
+    <input type="hidden" name="stamp" value="{{ form_stamp }}">
+    <div class="form__trap" aria-hidden="true">
+      <label>Website (leave this empty) <input name="website" type="text" tabindex="-1" autocomplete="off"></label>
+    </div>
     <label>Name <input name="name" type="text" value="{{ name }}" autocomplete="name" required maxlength="120" autofocus></label>
     <label>Email <input name="email" type="email" value="{{ email }}" autocomplete="email" required maxlength="320"></label>
     <label>Password <input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="1024">

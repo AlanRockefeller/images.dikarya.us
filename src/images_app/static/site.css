@@ -415,6 +415,8 @@ p.guidance { padding: 12px 16px; }
 .form label { display: grid; gap: 6px; font-weight: 600; font-size: 14px; }
 .form input { height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); font-weight: 400; font-size: 16px; }
 .form small { font-weight: 400; color: var(--muted); }
+/* Honeypot field: off screen for people, still "visible" to form-filling bots. */
+.form__trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 .alert { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-sm); }
 .prose { max-width: 68ch; padding: 34px 0; font-size: 17px; }
 .prose h2 { margin: 30px 0 10px; font-size: 21px; }
