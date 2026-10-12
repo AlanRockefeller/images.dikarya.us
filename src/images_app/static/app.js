@@ -149,6 +149,12 @@
 
   $$("input[data-typeahead]").forEach(typeahead);
 
+  document.addEventListener("input", (event) => {
+    if (event.target.name !== "other_taxon_id") return;
+    const other = event.target.form?.querySelector('input[name="inat_taxon_id"][value="other"]');
+    if (other) other.checked = true;
+  });
+
   /* ---------- Taxon gallery ---------- */
 
   const gallery = document.getElementById("gallery");
@@ -249,6 +255,13 @@
         });
         if (response.status === 401) {
           window.location.href = `/login?next=${encodeURIComponent(location.pathname)}`;
+          return;
+        }
+        if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
+          // Retrying won't help (e.g. 403: the form's CSRF cookie is gone).
+          dirty = false;
+          saving = false;
+          setStatus("Couldn’t save. Reload the page and try again.", "error");
           return;
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
