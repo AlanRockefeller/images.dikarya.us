@@ -101,7 +101,7 @@ All sync commands take one PostgreSQL advisory lock, so two never run at once (a
 
 The server layout (already in place) is:
 
-- Code: `/var/www/images.dikarya.us/app` (this repository, owned by `alan`, readable by group `images`). Virtualenv: `app/.venv`. Services run from `src/` via `PYTHONPATH`, so a `git pull` plus a restart deploys.
+- Code: `/var/www/images.dikarya.us/app` (this repository, owned by the deploying user, readable by group `images`). Virtualenv: `app/.venv`. Services run from `src/` via `PYTHONPATH`, so a `git pull` plus a restart deploys.
 - Secrets: `/var/www/images.dikarya.us/.env`, read by systemd as `EnvironmentFile`. Needs `APP_ENV=production`, `BASE_URL=https://images.dikarya.us`, `DATABASE_URL=postgresql+psycopg:///images` (peer auth as Unix user `images`) and `SECRET_KEY` (or the older name `SESSION_SECRET`), at least 32 random characters. Optional: `CONTACT_EMAIL`, `ROOT_TAXON_IDS`, `DISPLAY_LICENSES`.
 - `deploy/images.service`: uvicorn on `127.0.0.1:8017`, as user `images`, sandboxed. It `Requires=` `images-migrate.service`, which runs `alembic upgrade head` first.
 - `deploy/images-import-daily.{service,timer}`: daily at 04:10 UTC, runs `scripts/import-daily.sh` (→ `sync daily`).
@@ -181,3 +181,11 @@ To also have them as files in `/var/log/images/{activity,attack,scanner}.log`, i
 ## Licensing notes
 
 Photos stay on iNaturalist's and Mushroom Observer's servers and are shown with photographer, license (linked to the deed) and a link to the source observation. Only the licenses listed above are displayed. Photos with unclear or restrictive licenses are kept as hidden metadata. The site is non-commercial, which the CC BY-NC photos require. Taxonomy data is from iNaturalist (CC0/CC BY).
+
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+## License
+
+The code is under the [MIT License](LICENSE). Photos are not part of this repository; each remains under its photographer's license on iNaturalist or Mushroom Observer.
