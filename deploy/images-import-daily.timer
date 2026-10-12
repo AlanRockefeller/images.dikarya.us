@@ -2,7 +2,7 @@
 Description=Run daily image metadata synchronization
 
 [Timer]
-OnCalendar=*-*-* 04:10:00
+OnCalendar=*-*-* 04:10:00 UTC
 Persistent=true
 RandomizedDelaySec=30m
 Unit=images-import-daily.service

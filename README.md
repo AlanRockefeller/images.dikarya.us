@@ -104,7 +104,7 @@ The server layout (already in place) is:
 - Code: `/var/www/images.dikarya.us/app` (this repository, owned by the deploying user, readable by group `images`). Virtualenv: `app/.venv`. Services run from `src/` via `PYTHONPATH`, so a `git pull` plus a restart deploys.
 - Secrets: `/var/www/images.dikarya.us/.env`, read by systemd as `EnvironmentFile`. Needs `APP_ENV=production`, `BASE_URL=https://images.dikarya.us`, `DATABASE_URL=postgresql+psycopg:///images` (peer auth as Unix user `images`) and `SECRET_KEY` (or the older name `SESSION_SECRET`), at least 32 random characters. Optional: `CONTACT_EMAIL`, `ROOT_TAXON_IDS`, `DISPLAY_LICENSES`.
 - `deploy/images.service`: uvicorn on `127.0.0.1:8017`, as user `images`, sandboxed. It `Requires=` `images-migrate.service`, which runs `alembic upgrade head` first.
-- `deploy/images-import-daily.{service,timer}`: daily at 04:10 UTC, runs `scripts/import-daily.sh` (→ `sync daily`).
+- `deploy/images-import-daily.{service,timer}`: daily at 04:10 UTC plus a random delay of up to 30 minutes, runs `scripts/import-daily.sh` (→ `sync daily`).
 - `deploy/images-import-reconcile.{service,timer}`: monthly, runs `scripts/import-reconcile.sh` (→ `sync full`).
 - `deploy/images.nginx.conf`: TLS for `images.dikarya.us`, and a permanent redirect from `image.dikarya.us` (HTTP and HTTPS) to `https://images.dikarya.us$request_uri`, keeping the path and query. The app also redirects that hostname itself. Certificates come from the existing Certbot setup. `deploy/images-acme-bootstrap.nginx.conf` is the HTTP-only vhost used to issue the first certificate.
 
