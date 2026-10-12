@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from sqlalchemy import func, select
 
@@ -127,6 +129,14 @@ def test_attackers_are_watched_afterwards(client, species, logged):
     assert "path=/taxa" in logged.find("attack", "watched_ip.request")
 
 
+def test_watch_list_is_bounded(monkeypatch):
+    monkeypatch.setattr(logs, "MAX_WATCHED", 3)
+    for ip in ("2001:db8::1", "2001:db8::2", "2001:db8::3", "2001:db8::4"):
+        logs.watch(ip)
+    assert len(logs._watched) == 3
+    assert not logs.is_watched("2001:db8::1") and logs.is_watched("2001:db8::4")
+
+
 def test_attack_tools_on_real_pages_are_targeted(client, logged):
     client.get("/", headers={"User-Agent": "sqlmap/1.8#stable (https://sqlmap.org)"})
     logged.find("attack", "attack_tool")
@@ -226,3 +236,23 @@ def test_log_lines_cannot_be_forged():
                                   "select good photos from the forest", "where & when"])
 def test_ordinary_text_is_not_flagged(text):
     assert threats.find_payload(text) is None
+
+
+@pytest.mark.parametrize("text", ["1; select password from users where id=1",
+                                  "x\ny select name FROM taxa WHERE 1"])
+def test_select_from_where_is_flagged(text):
+    assert threats.find_payload(text)[0] == "sql_injection"
+
+
+def test_select_from_where_must_share_a_line():
+    assert threats.find_payload("select\nfrom\nwhere") is None
+
+
+@pytest.mark.parametrize("text", ["select from " * 700, "{{" * 4000, "{%" * 4000, "${" * 4000,
+                                  "#{" * 4000, "union" + " " * 8000],
+                         ids=["select-from", "braces", "brace-percent", "dollar-brace", "hash-brace", "union"])
+def test_hostile_input_is_scanned_quickly(text):
+    # These once backtracked for seconds, stalling every request on the event loop.
+    started = time.perf_counter()
+    threats.find_payload(text, text + "x")
+    assert time.perf_counter() - started < 0.5

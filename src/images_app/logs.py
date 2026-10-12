@@ -98,14 +98,20 @@ def request_fields(request: Request) -> dict[str, Any]:
 # IPs seen attacking, and when to stop watching them. In memory: the app runs as
 # one process, and losing the list on restart is harmless.
 WATCH_SECONDS = 3600
+MAX_WATCHED = 10_000
 _watched: dict[str, float] = {}
 
 
 def watch(ip: str) -> None:
     now = time.monotonic()
-    if len(_watched) > 10_000:
+    if len(_watched) >= MAX_WATCHED:
         for stale in [key for key, until in _watched.items() if until < now]:
             del _watched[stale]
+        # Still full (attacks from many addresses, e.g. across an IPv6 range):
+        # forget the longest-watched ones rather than grow without bound.
+        while len(_watched) >= MAX_WATCHED:
+            del _watched[next(iter(_watched))]
+    _watched.pop(ip, None)  # re-insert so the order is by most recent attack
     _watched[ip] = now + WATCH_SECONDS
 
 

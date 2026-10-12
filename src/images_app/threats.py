@@ -32,7 +32,7 @@ SCANNER_PATH = re.compile(
 
 PAYLOADS = [
     ("sql_injection", re.compile(
-        r"(?:\bunion\b[\s/*+]+(?:all[\s/*+]+)?select\b|\bselect\b.+\bfrom\b.+\bwhere\b|'\s*or\s*'?\d+'?\s*=\s*'?\d"
+        r"(?:\bunion\b[\s/*+]+(?:all[\s/*+]+)?select\b|'\s*or\s*'?\d+'?\s*=\s*'?\d"
         r"|\bor\s+1\s*=\s*1\b|\b(?:pg_)?sleep\s*\(\s*\d|\bbenchmark\s*\(|\bwaitfor\s+delay\b|information_schema"
         r"|\bxp_cmdshell\b|;\s*(?:drop|delete|insert|update|truncate)\s|'\s*(?:--|#|/\*)|\bextractvalue\s*\("
         r"|\bupdatexml\s*\()",
@@ -57,18 +57,49 @@ def is_scanner_path(path: str) -> bool:
     return bool(SCANNER_PATH.search(path))
 
 
+# Only the start of each value is examined. Every request's query string, cookies
+# and headers pass through here, and some patterns take quadratic time, so
+# unbounded input would let one request tie up the server.
+MAX_SCAN = 2048
+
+_SELECT, _FROM, _WHERE = (re.compile(rf"\b{word}\b", re.IGNORECASE) for word in ("select", "from", "where"))
+
+
+def _select_from_where(text: str) -> tuple[int, int] | None:
+    """Span of "select … from … where" within one line.
+
+    Searched for one word at a time: the equivalent regex,
+    `select.+from.+where`, backtracks cubically on input like "select from select from …".
+    """
+    for line in re.finditer(r"[^\n]+", text):
+        first = _SELECT.search(text, line.start(), line.end())
+        then = first and _FROM.search(text, first.end() + 1, line.end())
+        last = then and _WHERE.search(text, then.end() + 1, line.end())
+        if last:
+            return first.start(), last.end()
+    return None
+
+
+def _find(kind: str, pattern: re.Pattern, text: str) -> tuple[int, int] | None:
+    match = pattern.search(text)
+    if match:
+        return match.span()
+    return _select_from_where(text) if kind == "sql_injection" else None
+
+
 def find_payload(*values: str | None) -> tuple[str, str] | None:
     """Return (kind, offending text) for the first attack payload found, else None."""
     for value in values:
         if not value:
             continue
+        value = value[:MAX_SCAN]
         decoded = value
         for _ in range(2):  # catch double URL-encoding
             decoded = unquote_plus(decoded)
         for kind, pattern in PAYLOADS:
             for candidate in (value, decoded):
-                match = pattern.search(candidate)
-                if match:
-                    start = max(match.start() - 40, 0)
-                    return kind, candidate[start : match.end() + 40]
+                span = _find(kind, pattern, candidate)
+                if span:
+                    start = max(span[0] - 40, 0)
+                    return kind, candidate[start : span[1] + 40]
     return None
