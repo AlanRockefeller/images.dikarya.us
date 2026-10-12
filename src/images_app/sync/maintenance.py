@@ -88,6 +88,24 @@ WHERE taxa.inat_taxon_id = donor.ancestor
   AND taxa.cover_image_id IS DISTINCT FROM donor.cover_image_id
 """
 
+# BORROWED_COVERS for one taxon, looking up its donor through the ancestor_ids index.
+BORROWED_COVER = """
+UPDATE taxa SET cover_image_id = donor.cover_image_id
+FROM (
+    SELECT t.cover_image_id
+    FROM taxa t, taxa target
+    WHERE target.id = :taxon_id
+      AND t.ancestor_ids @> ARRAY[target.inat_taxon_id]
+      AND t.rank_level <= 10 AND t.image_count > 0 AND t.cover_image_id IS NOT NULL
+    ORDER BY t.image_count DESC, t.id
+    LIMIT 1
+) AS donor
+WHERE taxa.id = :taxon_id
+  AND NOT EXISTS (SELECT 1 FROM visible_votes vv WHERE vv.taxon_id = taxa.id)
+  AND (taxa.rank_level > 10 OR taxa.image_count = 0)
+  AND taxa.cover_image_id IS DISTINCT FROM donor.cover_image_id
+"""
+
 CLEAR_COVERS = """
 UPDATE taxa SET cover_image_id = NULL
 WHERE cover_image_id IS NOT NULL
@@ -109,3 +127,5 @@ def refresh_derived_data(db: Session) -> None:
 def refresh_cover(db: Session, taxon_id: int) -> None:
     """Cheap per-taxon cover refresh after someone changes their ranking."""
     db.execute(text(DIRECT_COVERS), {"taxon_id": taxon_id})
+    # Without votes, a higher taxon goes back to borrowing a descendant's cover.
+    db.execute(text(BORROWED_COVER), {"taxon_id": taxon_id})

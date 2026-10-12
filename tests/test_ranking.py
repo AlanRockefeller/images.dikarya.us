@@ -200,3 +200,16 @@ def test_cover_follows_first_place_votes(client, db, setup):
     save(client, [images[4].id])
     db.expire_all()
     assert db.get(Taxon, species.id).cover_image_id == images[4].id
+
+
+def test_genus_cover_reverts_when_its_last_vote_is_removed(client, db, setup):
+    species, images = setup
+    genus = db.get(Taxon, species.parent_id)
+    assert genus.cover_image_id == images[0].id  # borrowed from the species
+    login(client)
+    save(client, [images[4].id], taxon_id=48419)
+    db.expire_all()
+    assert db.get(Taxon, genus.id).cover_image_id == images[4].id
+    save(client, [], taxon_id=48419)
+    db.expire_all()
+    assert db.get(Taxon, genus.id).cover_image_id == images[0].id
