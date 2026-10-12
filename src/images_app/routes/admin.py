@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
@@ -89,13 +91,18 @@ def names(request: Request, status: str = "unresolved", page: int = 1, db: Sessi
 def map_name(
     request: Request,
     source_name_id: int,
-    inat_taxon_id: int = Form(),
+    inat_taxon_id: str = Form(),
+    other_taxon_id: str = Form(""),
     status: str = Form("unresolved"),
     db: Session = Depends(get_db),
 ):
+    # Names with suggested candidates also offer "another taxon", typed into other_taxon_id.
+    chosen = (other_taxon_id if inat_taxon_id == "other" else inat_taxon_id).strip()
+    if not re.fullmatch(r"[0-9]{1,9}", chosen):
+        raise HTTPException(422, "Choose a taxon or enter an iNaturalist taxon ID.")
     source_name = db.get(SourceName, source_name_id)
     taxon = db.scalar(
-        select(Taxon).where(Taxon.inat_taxon_id == inat_taxon_id, Taxon.is_active)
+        select(Taxon).where(Taxon.inat_taxon_id == int(chosen), Taxon.is_active)
     )
     if source_name is None:
         raise HTTPException(404, "Unknown source name.")

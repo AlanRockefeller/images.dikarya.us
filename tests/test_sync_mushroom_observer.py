@@ -158,6 +158,25 @@ def test_manual_mapping_publishes_photos_and_survives_resync(client, db, taxa, m
     assert db.get(SourceName, pending.id).method == "manual"
 
 
+def test_ambiguous_name_can_be_mapped_outside_its_candidates(client, db, taxa, make):
+    run_sync()
+    make.user(email="admin@example.org", admin=True)
+    login(client, email="admin@example.org")
+    ambiguous = db.scalar(select(SourceName).where(SourceName.name == "Ambigua"))
+    assert ambiguous.candidate_taxon_ids
+    page = client.get("/admin/names?status=ambiguous").text
+    assert 'value="other"' in page and 'name="other_taxon_id"' in page
+
+    def post(**data):
+        return client.post(f"/admin/names/{ambiguous.id}/map", data=data | {"csrf_token": csrf(client)},
+                           follow_redirects=False)
+
+    assert post(inat_taxon_id="other", other_taxon_id="").status_code == 422
+    assert post(inat_taxon_id="other", other_taxon_id="48715", status="ambiguous").status_code == 303
+    db.expire_all()
+    assert state(db)["105"] == (True, None, taxa["muscaria"].id)
+
+
 def test_admin_dashboard(client, db, taxa, make):
     run_sync()
     make.user(email="admin@example.org", admin=True)

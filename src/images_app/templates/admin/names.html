@@ -32,6 +32,11 @@
             {% set candidate = candidates[taxon_id] %}
             <label class="map-form__candidate"><input type="radio" name="inat_taxon_id" value="{{ candidate.inat_taxon_id }}" required>
               {{ taxon_name(candidate) }} <small class="muted">{{ candidate.rank }} · iNat {{ candidate.inat_taxon_id }}</small></label>
+            {% if loop.last %}
+            <label class="map-form__candidate"><input type="radio" name="inat_taxon_id" value="other" required> Another taxon:</label>
+            <input class="map-form__picker" name="other_taxon_id" inputmode="numeric" pattern="[0-9]+"
+                   placeholder="Taxon name or iNat ID" data-typeahead="pick" aria-label="Another iNaturalist taxon for {{ name.name }}">
+            {% endif %}
           {% else %}
             <input class="map-form__picker" name="inat_taxon_id" inputmode="numeric" pattern="[0-9]+" required
                    placeholder="Taxon name or iNat ID" data-typeahead="pick" aria-label="iNaturalist taxon for {{ name.name }}">
