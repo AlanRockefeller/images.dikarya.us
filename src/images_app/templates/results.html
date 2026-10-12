@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Community results for {{ plain_name(taxon) }} · {{ site_name }}{% endblock %}
+{% block body_class %}page-taxon{% endblock %}
+{% block content %}
+{% include "partials/taxon_header.html" %}
+{% if results %}
+<p class="guidance">{{ rankers|plural('person has', 'people have') }} ranked photos of {{ taxon_name(taxon) }}. Photos are ordered by first-place picks, then second and third places, then by how many people chose them.</p>
+<div class="table-wrap">
+<table class="results">
+  <thead>
+    <tr><th scope="col">#</th><th scope="col">Photo</th><th scope="col"><abbr title="First-place picks">1st</abbr></th><th scope="col"><abbr title="Second-place picks">2nd</abbr></th><th scope="col"><abbr title="Third-place picks">3rd</abbr></th><th scope="col">Chosen by</th><th scope="col">Mean rank</th></tr>
+  </thead>
+  <tbody>
+    {% for row in results %}
+    <tr>
+      <td class="results__pos">{{ loop.index }}</td>
+      <td class="results__photo">
+        <a href="{{ row.image.observation_url }}" rel="noopener"><img src="{{ row.image.thumb_url }}" alt="{{ image_alt(row.image, taxon) }}" loading="lazy"></a>
+        <span>{{ row.image.photographer }}<small>{{ license_label(row.image.license_code) }} · {{ source_label(row.image.source) }}</small></span>
+      </td>
+      <td>{{ row.firsts }}</td><td>{{ row.seconds }}</td><td>{{ row.thirds }}</td>
+      <td>{{ row.voters|plural('person', 'people') }}</td>
+      <td>{{ "%.1f"|format(row.mean_rank) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<section class="empty"><h2>No rankings yet</h2><p>Be the first to <a href="{{ taxon_url(taxon) }}">rank photos of {{ taxon_name(taxon) }}</a>.</p></section>
+{% endif %}
+{% endblock %}

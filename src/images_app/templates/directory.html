@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import taxon_card, pager %}
+{% block title %}{% if within %}Within {{ plain_name(within) }}{% else %}Browse fungi{% endif %} · {{ site_name }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>{% if within %}Within {{ taxon_name(within) }}{% else %}Browse fungi{% endif %}</h1>
+  <p>{{ listing.total|number }} {{ ranks[rank][0]|lower if rank != 'all' else 'taxa' }} with ITS-barcoded photos{% if letter %}, starting with “{{ letter }}”{% endif %}.
+    {% if within %}<a href="{{ taxon_url(within) }}">Back to {{ plain_name(within) }}</a>{% endif %}</p>
+</header>
+
+<form class="toolbar toolbar--directory" method="get" action="/taxa" data-autosubmit>
+  {% if within %}<input type="hidden" name="within" value="{{ within.inat_taxon_id }}">{% endif %}
+  {% if letter %}<input type="hidden" name="letter" value="{{ letter }}">{% endif %}
+  <label>Show
+    <select name="rank">{% for key, value in ranks.items() %}<option value="{{ key }}"{% if key == rank %} selected{% endif %}>{{ value[0] }}</option>{% endfor %}</select>
+  </label>
+  <label>Sort
+    <select name="sort">{% for key, label in sorts.items() %}<option value="{{ key }}"{% if key == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  </label>
+  <noscript><button class="button button--small" type="submit">Apply</button></noscript>
+</form>
+
+{% set base = '/taxa?rank=' ~ rank ~ '&sort=' ~ sort ~ ('&within=' ~ within.inat_taxon_id if within else '') %}
+<nav class="letters" aria-label="First letter">
+  <a href="{{ base }}"{% if not letter %} aria-current="page"{% endif %}>All</a>
+  {% for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" %}<a href="{{ base }}&amp;letter={{ ch }}"{% if letter == ch %} aria-current="page"{% endif %}>{{ ch }}</a>{% endfor %}
+</nav>
+
+{% if listing.taxa %}
+  <div class="card-grid card-grid--dense">
+    {% for taxon in listing.taxa %}{{ taxon_card(taxon, show_rank=rank in ('all', 'infraspecies')) }}{% endfor %}
+  </div>
+  {{ pager(listing.page, listing.pages, base ~ ('&letter=' ~ letter if letter else '') ~ '&') }}
+{% else %}
+  <section class="empty"><h2>Nothing here</h2><p>No taxa match these filters. Try another letter or rank.</p></section>
+{% endif %}
+{% endblock %}

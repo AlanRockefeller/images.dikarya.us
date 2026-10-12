@@ -1,0 +1,41 @@
+[Unit]
+Description=Dikarya Images FastAPI web application
+After=network.target postgresql.service images-migrate.service
+Wants=postgresql.service
+Requires=images-migrate.service
+
+[Service]
+Type=simple
+User=images
+Group=images
+WorkingDirectory=/var/www/images.dikarya.us/app
+EnvironmentFile=/var/www/images.dikarya.us/.env
+Environment=APP_ROOT=/var/www/images.dikarya.us/app
+Environment=PYTHONPATH=/var/www/images.dikarya.us/app/src
+Environment=PATH=/var/www/images.dikarya.us/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/var/www/images.dikarya.us/app/.venv/bin/uvicorn images_app.main:app --host 127.0.0.1 --port 8017 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=30
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

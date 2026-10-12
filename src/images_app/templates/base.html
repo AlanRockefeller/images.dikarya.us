@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ site_name }}{% endblock %}</title>
+  <meta name="description" content="{% block description %}Community rankings of the most useful DNA-barcoded photographs of fungi.{% endblock %}">
+  <link rel="icon" href="{{ static_url('favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ static_url('site.css') }}">
+  <script src="{{ static_url('app.js') }}" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="/" aria-label="{{ site_name }} home">
+        <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 15c0-7 6-11 13-11s13 4 13 11c0 1-1 2-2 2H5c-1 0-2-1-2-2z"/><path d="M12 18h8l-1 10h-6z" opacity=".55"/></svg>
+        <span class="brand__name">Dikarya <span>Images</span></span>
+      </a>
+      <form class="site-search" action="/search" method="get" role="search">
+        <label class="visually-hidden" for="site-search-input">Search taxa</label>
+        <svg class="site-search__icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4.5 4.5"/></svg>
+        <input id="site-search-input" name="q" type="search" placeholder="Search species, genera, common names…"
+               autocomplete="off" spellcheck="false" data-typeahead value="{{ q if q is defined else '' }}">
+      </form>
+      <nav class="site-nav" aria-label="Main">
+        <a href="/taxa"{% if request.url.path.startswith('/taxa') %} aria-current="page"{% endif %}>Browse</a>
+        <a href="/about"{% if request.url.path == '/about' %} aria-current="page"{% endif %}>About</a>
+        {% if user %}
+          <details class="account-menu">
+            <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ user.name[:1]|upper }}</span><span class="account-menu__name">{{ user.name }}</span></summary>
+            <div class="account-menu__panel">
+              <a href="/me">My rankings</a>
+              {% if user.is_admin %}<a href="/admin">Admin</a>{% endif %}
+              <form action="/logout" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit">Log out</button>
+              </form>
+            </div>
+          </details>
+        {% else %}
+          <a href="/login?next={{ request.url.path|urlencode }}">Log in</a>
+          <a class="button button--small" href="/register?next={{ request.url.path|urlencode }}">Join</a>
+        {% endif %}
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-footer__inner">
+      <p>Photographs belong to their photographers and are shown under the license listed with each one. Images load directly from
+        <a href="https://www.inaturalist.org/">iNaturalist</a> and <a href="https://mushroomobserver.org/">Mushroom Observer</a>; taxonomy follows iNaturalist.</p>
+      <p><a href="/about">About this project</a> · <a href="/taxa">Browse</a></p>
+    </div>
+  </footer>
+  {% block after %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}About · {{ site_name }}{% endblock %}
+{% block content %}
+<article class="prose">
+  <h1>About Dikarya Images</h1>
+  <p>Field guides, identification keys and apps all need a few photos that show what each species really looks like. This site asks people who know fungi to choose them.</p>
+
+  <h2>Why only DNA-barcoded observations?</h2>
+  <p>Many fungi cannot be identified reliably from photos alone. Every photo here comes from an observation with an <strong>ITS barcode sequence</strong>: on iNaturalist, observations whose “DNA Barcode ITS” field holds a sequence; on Mushroom Observer, observations with an ITS sequence record. The identification still comes from the source site and can change; we re-sync regularly.</p>
+
+  <h2>How ranking works</h2>
+  <p>On a taxon’s page, tap photos in order of usefulness. Your first pick is #1, the next #2, and so on. Tap a ranked photo to remove it, and drag in the ranking bar to reorder. Changes save immediately. Choose photos that show:</p>
+  <ul>
+    <li><strong>diagnostic characters</strong>, the features that separate this taxon from look-alikes;</li>
+    <li><strong>typical form</strong> rather than an odd specimen;</li>
+    <li><strong>clarity</strong>: sharp, well exposed, and readable as a small thumbnail.</li>
+  </ul>
+  <p>The prettiest picture isn’t always the most useful one. Every person’s ranking is stored separately, and the <em>Community results</em> tab shows how often each photo was picked first, second or third.</p>
+
+  <h2>Licensing and credit</h2>
+  <p>Images are never copied to this server. They load directly from iNaturalist and Mushroom Observer, and each one is shown with its photographer and license. We only display photos under Creative Commons or public-domain terms (CC0, CC BY, CC BY-SA, CC BY-NC and CC BY-NC-SA). This site is non-commercial. To reuse a photo, follow the license on its source page.</p>
+
+  <h2>Taxonomy</h2>
+  <p>Names and classification follow <a href="https://www.inaturalist.org/taxa/47170">iNaturalist</a>. Mushroom Observer names are matched to iNaturalist taxa by exact name or known synonym; names that can’t be matched confidently wait for review instead of being guessed.</p>
+</article>
+{% endblock %}

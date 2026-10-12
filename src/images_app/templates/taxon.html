@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import breadcrumbs, taxon_card %}
+{% block title %}{{ plain_name(taxon) }}{% if taxon.common_name %} ({{ taxon.common_name }}){% endif %} · {{ site_name }}{% endblock %}
+{% block description %}Rank the most useful DNA-barcoded photos of {{ plain_name(taxon) }}.{% endblock %}
+{% block body_class %}page-taxon{% if user %} can-rank{% endif %}{% endblock %}
+{% block content %}
+{% include "partials/taxon_header.html" %}
+
+{% if children %}
+<section class="subtaxa" aria-labelledby="subtaxa-title">
+  <header class="section__head">
+    <h2 id="subtaxa-title">Within {{ taxon_name(taxon) }}</h2>
+    {% if children_total > children|length or listing.total %}
+      <a href="/taxa?within={{ taxon.inat_taxon_id }}&amp;rank=all&amp;sort=photos">All {{ children_total|number }} →</a>
+    {% endif %}
+  </header>
+  {% if listing.total %}
+    <ul class="chips">
+      {% for child in children %}<li><a class="chip" href="{{ taxon_url(child) }}">{{ taxon_name(child) }} <span>{{ child.subtree_image_count|number }}</span></a></li>{% endfor %}
+    </ul>
+  {% else %}
+    <div class="card-grid">{% for child in children %}{{ taxon_card(child, show_rank=child.rank != 'species') }}{% endfor %}</div>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if listing.total %}
+<section class="photos" aria-labelledby="photos-title">
+  <h2 id="photos-title" class="visually-hidden">Photos</h2>
+  <details class="guidance">
+    <summary>{% if user %}<strong>Tap the photos that best show {{ taxon_name(taxon) }}, best first.</strong>{% else %}<a href="/login?next={{ taxon_url(taxon)|urlencode }}">Log in</a> or <a href="/register?next={{ taxon_url(taxon)|urlencode }}">join</a> to rank these photos.{% endif %}
+      Useful beats pretty. <span class="guidance__more">Tips</span></summary>
+    <p>Look for <strong>diagnostic features</strong> (the ones that separate it from look-alikes), <strong>typical form</strong> rather than odd specimens, and photos that stay <strong>clear at thumbnail size</strong>. Your first pick becomes #1. Tap a ranked photo to remove it, and reorder in the bar at the bottom. Changes save as you go.</p>
+  </details>
+
+  <form class="toolbar" method="get" action="{{ taxon_url(taxon) }}" data-autosubmit>
+    <label>Sort
+      <select name="sort">{% for key, label in sorts.items() %}<option value="{{ key }}"{% if key == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    </label>
+    {% if listing.has_mo %}
+    <label>Source
+      <select name="source">{% for key, label in sources.items() %}<option value="{{ key }}"{% if key == source %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    </label>
+    {% endif %}
+    {% if subtaxa_included %}
+    <label class="toolbar__check"><input type="checkbox" name="only" value="1"{% if only %} checked{% endif %}> Hide photos of subtaxa</label>
+    {% endif %}
+    <noscript><button class="button button--small" type="submit">Apply</button></noscript>
+    <span class="toolbar__count">{{ listing.total|plural('photo') }}</span>
+  </form>
+
+  <ul class="gallery" id="gallery" data-taxon-name="{{ plain_name(taxon) }}">
+    {% include "partials/tiles.html" %}
+  </ul>
+  {% if user %}
+  <form id="toggle-form" method="post" action="/taxon/{{ taxon.inat_taxon_id }}/toggle" hidden>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="back" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+  </form>
+  {% endif %}
+</section>
+{% elif not children %}
+<section class="empty"><h2>No photos yet</h2><p>No ITS-barcoded observations with displayable licenses are filed under this taxon.</p></section>
+{% endif %}
+{% endblock %}
+
+{% block after %}
+{% if listing.total %}
+  {% if user %}
+  <aside class="tray" id="tray" aria-label="Your ranking" data-api="/api/taxa/{{ taxon.inat_taxon_id }}/ranking">
+    <div class="tray__inner">
+      <div class="tray__head">
+        <h2 class="tray__title">Your ranking</h2>
+        <span class="tray__hint">Drag to reorder</span>
+        <span class="tray__status" role="status" aria-live="polite"></span>
+      </div>
+      <ol class="tray__list" aria-describedby="tray-help">
+        {% for image in ranked %}
+        <li class="tray__item" data-id="{{ image.id }}" data-thumb="{{ image.thumb_url }}">
+          <span class="tray__num">{{ loop.index }}</span><img src="{{ image.thumb_url }}" alt="">
+        </li>
+        {% endfor %}
+      </ol>
+      <p class="tray__empty" id="tray-help">Tap photos in order of usefulness. Your first pick is #1.</p>
+    </div>
+  </aside>
+  {% endif %}
+  {% include "partials/viewer.html" %}
+{% endif %}
+{% endblock %}

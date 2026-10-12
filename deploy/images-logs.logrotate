@@ -1,0 +1,12 @@
+/var/log/images/*.log {
+    weekly
+    rotate 26
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}

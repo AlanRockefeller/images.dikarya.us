@@ -1,0 +1,26 @@
+<dialog class="viewer" id="viewer" aria-label="Photo details">
+  <div class="viewer__stage">
+    <img class="viewer__img" alt="">
+    <button class="viewer__nav viewer__nav--prev" type="button" aria-label="Previous photo">‹</button>
+    <button class="viewer__nav viewer__nav--next" type="button" aria-label="Next photo">›</button>
+  </div>
+  <div class="viewer__panel">
+    <button class="viewer__close" type="button" aria-label="Close">×</button>
+    {% if user %}
+      <p class="viewer__state"></p>
+      <button class="button viewer__toggle" type="button"></button>
+    {% else %}
+      <p class="viewer__state"><a href="/login?next={{ request.url.path|urlencode }}">Log in</a> to rank photos.</p>
+    {% endif %}
+    <dl class="viewer__facts">
+      <div class="viewer__taxon-row"><dt>Identified as</dt><dd class="viewer__taxon"></dd></div>
+      <div><dt>Photographer</dt><dd class="viewer__credit"></dd></div>
+      <div><dt>License</dt><dd class="viewer__license"></dd></div>
+      <div><dt>Observed</dt><dd class="viewer__observed"></dd></div>
+      <div class="viewer__its-row"><dt>ITS sequence</dt><dd class="viewer__its"></dd></div>
+      <div class="viewer__faves-row"><dt>iNaturalist faves</dt><dd class="viewer__faves"></dd></div>
+    </dl>
+    <a class="viewer__source external" rel="noopener" target="_blank"></a>
+    <p class="viewer__keys">← → to browse{% if user %} · <kbd>R</kbd> to rank{% endif %} · <kbd>Esc</kbd> to close</p>
+  </div>
+</dialog>

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import pager %}
+{% block title %}Name mapping · Admin · {{ site_name }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>Mushroom Observer names</h1>
+  <p>MO consensus names are matched to iNaturalist taxa by exact name, MO synonym, or a known alias. Anything else waits here. Photos under an unmapped name stay hidden until you choose a taxon. Manual mappings are never overwritten by later imports. <a href="/admin">Back to admin</a></p>
+</header>
+<nav class="tabs tabs--plain" aria-label="Status">
+  {% for key in ('unresolved', 'ambiguous', 'mapped') %}<a href="/admin/names?status={{ key }}"{% if key == status %} aria-current="page"{% endif %}>{{ key|capitalize }}</a>{% endfor %}
+</nav>
+<p class="muted">{{ total|number }} names, most photos first.</p>
+<div class="table-wrap">
+<table class="data names">
+  <thead><tr><th>MO name</th><th>Photos</th><th>{% if status == 'mapped' %}Mapped to{% else %}Map to iNaturalist taxon{% endif %}</th></tr></thead>
+  <tbody>
+  {% for name, images, observations in rows %}
+    <tr>
+      <td>
+        <a href="https://mushroomobserver.org/names/{{ name.source_name_id }}" rel="noopener"><i>{{ name.name }}</i></a> {{ name.author or '' }}
+        <small class="muted">{{ name.rank or '' }}{% if name.note %} · {{ name.note }}{% endif %}</small>
+      </td>
+      <td>{{ images|number }} <small class="muted">in {{ observations|plural('obs.', 'obs.') }}</small></td>
+      <td>
+        {% if status == 'mapped' %}
+          {% if name.taxon %}<a href="{{ taxon_url(name.taxon) }}">{{ taxon_name(name.taxon) }}</a> <small class="muted">({{ name.method }})</small>{% endif %}
+        {% else %}
+        <form class="map-form" method="post" action="/admin/names/{{ name.id }}/map">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="status" value="{{ status }}">
+          {% for taxon_id in name.candidate_taxon_ids if taxon_id in candidates %}
+            {% set candidate = candidates[taxon_id] %}
+            <label class="map-form__candidate"><input type="radio" name="inat_taxon_id" value="{{ candidate.inat_taxon_id }}" required>
+              {{ taxon_name(candidate) }} <small class="muted">{{ candidate.rank }} · iNat {{ candidate.inat_taxon_id }}</small></label>
+            {% if loop.last %}
+            <label class="map-form__candidate"><input type="radio" name="inat_taxon_id" value="other" required> Another taxon:</label>
+            <input class="map-form__picker" name="other_taxon_id" inputmode="numeric" pattern="[0-9]+"
+                   placeholder="Taxon name or iNat ID" data-typeahead="pick" aria-label="Another iNaturalist taxon for {{ name.name }}">
+            {% endif %}
+          {% else %}
+            <input class="map-form__picker" name="inat_taxon_id" inputmode="numeric" pattern="[0-9]+" required
+                   placeholder="Taxon name or iNat ID" data-typeahead="pick" aria-label="iNaturalist taxon for {{ name.name }}">
+          {% endfor %}
+          <button class="button button--small" type="submit">Map</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="3">Nothing to review.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{{ pager(page, pages, '/admin/names?status=' ~ status ~ '&') }}
+{% endblock %}

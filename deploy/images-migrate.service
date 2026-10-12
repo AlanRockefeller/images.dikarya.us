@@ -1,0 +1,23 @@
+[Unit]
+Description=Apply Dikarya Images database migrations
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=images
+Group=images
+WorkingDirectory=/var/www/images.dikarya.us/app
+EnvironmentFile=/var/www/images.dikarya.us/.env
+Environment=APP_ROOT=/var/www/images.dikarya.us/app
+Environment=PYTHONPATH=/var/www/images.dikarya.us/app/src
+Environment=PATH=/var/www/images.dikarya.us/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/var/www/images.dikarya.us/app/.venv/bin/alembic upgrade head
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=

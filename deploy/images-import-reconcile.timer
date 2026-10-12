@@ -1,0 +1,13 @@
+[Unit]
+Description=Monthly full image metadata reconciliation
+
+[Timer]
+OnCalendar=monthly
+# A full scan makes roughly a thousand paced iNaturalist API requests (~30 min).
+# Don't trigger a catch-up run just because the timer was disabled for a while.
+Persistent=false
+RandomizedDelaySec=4h
+Unit=images-import-reconcile.service
+
+[Install]
+WantedBy=timers.target

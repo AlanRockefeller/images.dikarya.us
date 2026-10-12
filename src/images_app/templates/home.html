@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import taxon_card %}
+{% block body_class %}page-home{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="hero__text">
+    <h1>Which photos show each fungus best?</h1>
+    <p class="hero__lede">Every photograph here comes from an observation with an <strong>ITS DNA barcode</strong>, so the identifications are as reliable as field photos get. Pick the ones that would help someone recognize each species, in order.</p>
+    <form class="hero-search" action="/search" method="get" role="search">
+      <label class="visually-hidden" for="hero-search">Search taxa</label>
+      <input id="hero-search" name="q" type="search" placeholder="Try “Amanita muscaria” or “chanterelle”" autocomplete="off" spellcheck="false" data-typeahead>
+      <button class="button" type="submit">Search</button>
+    </form>
+    <dl class="stats">
+      <div><dt>Photos</dt><dd>{{ stats.photos|number }}</dd></div>
+      <div><dt>Taxa</dt><dd>{{ stats.taxa|number }}</dd></div>
+      <div><dt>People ranking</dt><dd>{{ stats.rankers|number }}</dd></div>
+    </dl>
+  </div>
+  {% if mosaic|length == 6 %}
+  <div class="hero__mosaic">
+    {% for taxon in mosaic %}<a href="{{ taxon_url(taxon) }}" title="{{ plain_name(taxon) }}"><img src="{{ taxon.cover_image.medium_url }}" alt="{{ plain_name(taxon) }}" decoding="async"></a>{% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{% if recent %}
+<section class="section">
+  <header class="section__head"><h2>Recently ranked</h2><a href="/taxa?sort=photos">Browse all</a></header>
+  <div class="card-grid">{% for taxon in recent %}{{ taxon_card(taxon) }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if unranked %}
+<section class="section">
+  <header class="section__head"><h2>Waiting for their first ranking</h2><a href="/taxa?sort=photos">More species</a></header>
+  <div class="card-grid">{% for taxon in unranked %}{{ taxon_card(taxon) }}{% endfor %}</div>
+</section>
+{% endif %}
+
+{% if groups %}
+<section class="section">
+  <header class="section__head"><h2>Browse by order</h2><a href="/taxa?rank=order&amp;sort=photos">All orders</a></header>
+  <ul class="chips">
+    {% for taxon in groups %}<li><a class="chip" href="{{ taxon_url(taxon) }}">{{ taxon.name }} <span>{{ taxon.subtree_image_count|number }}</span></a></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if not stats.photos %}
+<section class="empty">
+  <h2>Photos are on their way</h2>
+  <p>The first import from iNaturalist and Mushroom Observer hasn’t finished yet. Check back soon.</p>
+</section>
+{% endif %}
+{% endblock %}

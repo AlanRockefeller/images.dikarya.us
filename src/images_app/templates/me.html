@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}My rankings · {{ site_name }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>My rankings</h1>
+  <p>{{ rankings|length|plural('taxon', 'taxa') }} ranked, most recent first.</p>
+</header>
+{% if rankings %}
+<ul class="my-rankings">
+  {% for entry in rankings %}
+  <li>
+    <a class="my-ranking" href="{{ taxon_url(entry.taxon) }}">
+      <span class="my-ranking__name">{{ taxon_name(entry.taxon) }}{% if entry.taxon.common_name %} <small>{{ entry.taxon.common_name }}</small>{% endif %}</span>
+      <span class="my-ranking__strip">
+        {% for image in entry.images %}<span class="my-ranking__pick"><img src="{{ image.thumb_url }}" alt="" loading="lazy"><b>{{ loop.index }}</b></span>{% endfor %}
+        {% if entry.count > entry.images|length %}<span class="my-ranking__more">+{{ entry.count - entry.images|length }}</span>{% endif %}
+      </span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<section class="empty"><h2>Nothing ranked yet</h2><p><a href="/taxa?sort=photos">Find a species</a> and tap the photos that show it best.</p></section>
+{% endif %}
+{% endblock %}

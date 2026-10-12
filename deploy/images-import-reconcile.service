@@ -1,0 +1,33 @@
+[Unit]
+Description=Full image metadata reconciliation (taxonomy, iNaturalist full scan, Mushroom Observer)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=images
+Group=images
+WorkingDirectory=/var/www/images.dikarya.us/app
+EnvironmentFile=/var/www/images.dikarya.us/.env
+Environment=APP_ROOT=/var/www/images.dikarya.us/app
+Environment=PYTHONPATH=/var/www/images.dikarya.us/app/src
+Environment=PATH=/var/www/images.dikarya.us/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=images-import
+StateDirectoryMode=0750
+ExecStart=/bin/bash /var/www/images.dikarya.us/app/scripts/import-reconcile.sh
+TimeoutStartSec=infinity
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/images-import
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+Nice=15
+CPUWeight=10
+IOWeight=10
+MemoryHigh=3G
+MemoryMax=4G
